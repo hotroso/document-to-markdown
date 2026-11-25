@@ -32,24 +32,34 @@ Designed for personal AI, LLM, and RAG workflows where document layouts vary wil
 
 Requires **Python >= 3.10**.
 
+### Direct Install via `pip` (Recommended)
+
+Install directly from GitHub in one command without cloning:
+
+```bash
+# Base install (native PDF + Excel)
+pip install git+https://github.com/sinhsac/document-to-markdown.git
+
+# Recommended: add PaddleOCR + PP-Structure layout/table analysis
+pip install "document-to-markdown[ocr] @ git+https://github.com/sinhsac/document-to-markdown.git"
+
+# Optional: Tesseract OCR fallback or Excel formula engine
+pip install "document-to-markdown[tesseract] @ git+https://github.com/sinhsac/document-to-markdown.git"
+pip install "document-to-markdown[excel-calc] @ git+https://github.com/sinhsac/document-to-markdown.git"
+
+# Install everything
+pip install "document-to-markdown[all] @ git+https://github.com/sinhsac/document-to-markdown.git"
+```
+
+### From Local Source (Development)
+
 ```bash
 git clone https://github.com/sinhsac/document-to-markdown.git
 cd document-to-markdown
 
-# Base install (native PDF + Excel)
 pip install -e .
-
-# Recommended: add PaddleOCR + PP-Structure layout/table analysis
+# or with optional extras: [ocr], [tesseract], [excel-calc], [all]
 pip install -e ".[ocr]"
-
-# Optional: Tesseract OCR fallback
-pip install -e ".[tesseract]"
-
-# Optional: pure-Python Excel formula evaluation
-pip install -e ".[excel-calc]"
-
-# Install everything
-pip install -e ".[all]"
 ```
 
 > **Note:** On the first OCR / structure run, PaddleOCR automatically downloads detection, recognition, and layout models (a few hundred MB).
