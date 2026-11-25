@@ -1,5 +1,12 @@
 # Document to Markdown
 
+[![CI](https://github.com/sinhsac/document-to-markdown/actions/workflows/ci.yml/badge.svg)](https://github.com/sinhsac/document-to-markdown/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/sinhsac/document-to-markdown?include_prereleases&sort=semver)](https://github.com/sinhsac/document-to-markdown/releases)
+[![Downloads](https://img.shields.io/github/downloads/sinhsac/document-to-markdown/total)](https://github.com/sinhsac/document-to-markdown/releases)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)](pyproject.toml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/sinhsac/document-to-markdown?style=social)](https://github.com/sinhsac/document-to-markdown/stargazers)
+
 Local, zero-config converter for **PDF**, **images**, and **Excel** files into clean, AI/RAG-ready **Markdown**.
 
 Designed for personal AI, LLM, and RAG workflows where document layouts vary wildly and you want clean `.md` files out of the box without complex setup.
@@ -48,6 +55,10 @@ pip install -e ".[all]"
 > **Note:** On the first OCR / structure run, PaddleOCR automatically downloads detection, recognition, and layout models (a few hundred MB).
 
 For detailed workflows, troubleshooting, and examples, see the [Usage Guide](USAGE.md).
+
+### Prebuilt Installers & Packages
+
+Prebuilt Python packages (`.whl`, `.tar.gz`) and standalone executables (Linux, Windows `.exe`, macOS — bundling native PDF, Excel, and Tesseract OCR support) are automatically built by [GitHub Actions](.github/workflows/release.yml) and published on the [Releases page](https://github.com/sinhsac/document-to-markdown/releases). For full PaddleOCR / PP-Structure support, install from source with `pip install -e ".[ocr]"`.
 
 ## Usage
 
@@ -158,3 +169,7 @@ When a workbook contains formulas, the converter resolves cell values in order:
 ## License
 
 Released under the [MIT License](LICENSE).
+
+## Repository Stats
+
+[![Star History Chart](https://api.star-history.com/svg?repos=sinhsac/document-to-markdown&type=Date)](https://star-history.com/#sinhsac/document-to-markdown&Date)
