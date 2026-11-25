@@ -4,80 +4,127 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from .models import Block, Document
-from .ocr_engine import run_plain_ocr_on_array, run_structure_on_image
+from .ocr_engine import (
+    detect_ocr_engine,
+    ocr_pil_image_tesseract,
+    run_plain_ocr_on_array,
+    run_structure_on_image,
+)
 
 logger = logging.getLogger(__name__)
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
 
 
+def _ocr_single_frame(
+    frame,
+    img_array,
+    ocr: str,
+    engine: str,
+    ocr_lang: str,
+    use_structure: bool,
+    page_number: Optional[int],
+    document: Document,
+) -> List[Block]:
+    blocks: List[Block] = []
+    if engine == "paddle":
+        if use_structure:
+            try:
+                blocks = run_structure_on_image(img_array, lang=ocr_lang, page_number=page_number)
+                if blocks:
+                    document.metadata["ocr_engine"] = "ppstructure"
+                    return blocks
+                document.warn("Structure analysis returned no blocks; falling back to plain OCR.")
+            except Exception as exc:
+                document.warn(f"Structure analysis failed ({exc}); falling back to plain OCR.")
+
+        try:
+            blocks = run_plain_ocr_on_array(img_array, lang=ocr_lang)
+            if page_number is not None:
+                for b in blocks:
+                    b.source = {**b.source, "page": page_number}
+            document.metadata["ocr_engine"] = "paddle"
+            return blocks
+        except Exception as exc:
+            if (ocr or "auto").lower() == "auto":
+                try:
+                    blocks = ocr_pil_image_tesseract(frame, lang=ocr_lang, page_number=page_number)
+                    document.warn(f"PaddleOCR failed ({exc}); fell back to Tesseract.")
+                    document.metadata["ocr_engine"] = "tesseract"
+                    return blocks
+                except Exception:
+                    pass
+            document.warn(f"PaddleOCR failed ({exc})")
+            raise RuntimeError(f"OCR failed for image: {exc}") from exc
+
+    if engine == "tesseract":
+        try:
+            blocks = ocr_pil_image_tesseract(frame, lang=ocr_lang, page_number=page_number)
+            document.metadata["ocr_engine"] = "tesseract"
+            return blocks
+        except Exception as exc:
+            raise RuntimeError(f"Tesseract OCR failed: {exc}") from exc
+
+    raise RuntimeError("OCR is required for image inputs; use --ocr auto|paddle|tesseract")
+
+
 def convert_image(
     path: Path,
     ocr: str = "auto",
-    ocr_lang: str = "eng",
+    ocr_lang: str = "vie",
     use_structure: bool = True,
 ) -> Document:
-    """Convert a single image file to a Document using layout-aware OCR."""
+    """Convert an image file (including multi-page TIFF) to a Document using layout-aware OCR."""
     try:
-        from PIL import Image
+        from PIL import Image, ImageOps, ImageSequence
         import numpy as np
     except ImportError as exc:
         raise RuntimeError("Image support requires Pillow and numpy (install with [ocr] extra)") from exc
+
+    engine = detect_ocr_engine(ocr)
+    if engine == "off":
+        raise RuntimeError(
+            "No OCR engine available (install paddleocr or pytesseract, or check --ocr)."
+        )
 
     document = Document(
         str(path),
         "image",
         path.stem,
-        metadata={"ocr_mode": ocr, "use_structure": use_structure},
+        metadata={"ocr_mode": ocr, "ocr_engine": engine, "use_structure": use_structure},
     )
 
-    image = Image.open(path).convert("RGB")
-    img_array = np.array(image)
+    with Image.open(path) as pil_file:
+        if getattr(pil_file, "n_frames", 1) <= 1:
+            frames = [ImageOps.exif_transpose(pil_file).convert("RGB")]
+        else:
+            frames = [
+                ImageOps.exif_transpose(frame).convert("RGB")
+                for frame in ImageSequence.Iterator(pil_file)
+            ]
 
-    blocks: list[Block] = []
-    engine = (ocr or "auto").lower()
+    multi_frame = len(frames) > 1
+    for idx, frame in enumerate(frames):
+        page_number = idx + 1 if multi_frame else None
+        img_array = np.array(frame)
+        frame_blocks = _ocr_single_frame(
+            frame,
+            img_array,
+            ocr=ocr,
+            engine=engine,
+            ocr_lang=ocr_lang,
+            use_structure=use_structure,
+            page_number=page_number,
+            document=document,
+        )
+        for b in frame_blocks:
+            document.add(b)
+        if multi_frame and idx < len(frames) - 1:
+            document.add(Block("page_break", source={"page": idx + 1}))
 
-    if engine in {"auto", "paddle"} and use_structure:
-        try:
-            blocks = run_structure_on_image(img_array, lang=ocr_lang)
-            if blocks:
-                document.metadata["ocr_engine"] = "ppstructure"
-                for b in blocks:
-                    document.add(b)
-                return document
-            document.warn("Structure analysis returned no blocks; falling back to plain OCR.")
-        except Exception as exc:
-            document.warn(f"Structure analysis failed ({exc}); falling back to plain OCR.")
-
-    if engine in {"auto", "paddle"}:
-        try:
-            blocks = run_plain_ocr_on_array(img_array, lang=ocr_lang)
-            document.metadata["ocr_engine"] = "paddle"
-        except Exception as exc:
-            document.warn(f"PaddleOCR failed ({exc})")
-            raise RuntimeError(f"OCR failed for image {path.name}: {exc}") from exc
-    elif engine == "tesseract":
-        try:
-            import pytesseract
-            from PIL import Image as PILImage
-
-            data = pytesseract.image_to_string(PILImage.open(path), lang=ocr_lang)
-            for para in data.split("\n\n"):
-                para = para.strip()
-                if para:
-                    document.add(Block("paragraph", para, metadata={"ocr_engine": "tesseract"}))
-            document.metadata["ocr_engine"] = "tesseract"
-            return document
-        except Exception as exc:
-            raise RuntimeError(f"Tesseract OCR failed: {exc}") from exc
-    else:
-        raise RuntimeError("OCR is required for image inputs; use --ocr auto|paddle|tesseract")
-
-    for b in blocks:
-        document.add(b)
     if not document.blocks:
         document.warn("No text detected in image.")
         document.add(Block("paragraph", "(no text detected)"))

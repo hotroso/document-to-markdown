@@ -12,8 +12,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .models import Block, Document
 from .ocr_engine import (
-    get_paddle_ocr,
-    map_lang_for_paddle,
+    detect_ocr_engine,
+    ocr_pil_image_tesseract,
     run_plain_ocr_on_array,
     run_structure_on_image,
 )
@@ -226,72 +226,34 @@ def _ocr_page_plain(page, page_number: int, lang: str) -> List[Block]:
 
 def _ocr_page_tesseract(page, page_number: int, lang: str) -> List[Block]:
     try:
-        import pytesseract
         from PIL import Image
     except ImportError as exc:
         raise RuntimeError("Tesseract OCR requires pytesseract and Pillow") from exc
 
     image = Image.open(io.BytesIO(page.get_pixmap(dpi=300).tobytes("png")))
-    data = pytesseract.image_to_data(image, lang=lang, output_type=pytesseract.Output.DICT)
-    total = len(data.get("text", []))
-    groups: Dict[Tuple[int, int], List[int]] = {}
-    for index in range(total):
-        if str(data.get("text", [""] * total)[index] or "").strip():
-            key = (
-                int(data.get("block_num", [0] * total)[index] or 0),
-                int(data.get("line_num", [0] * total)[index] or 0),
-            )
-            groups.setdefault(key, []).append(index)
-
-    blocks: List[Block] = []
-    for (block_number, _), indices in sorted(
-        groups.items(),
-        key=lambda item: (
-            item[0][0],
-            min(int(data.get("top", [0] * total)[i] or 0) for i in item[1]),
-        ),
-    ):
-        indices.sort(key=lambda i: int(data.get("left", [0] * total)[i] or 0))
-        text = " ".join(str(data["text"][i]) for i in indices).strip()
-        if text:
-            confidence_values = [
-                float(data.get("conf", [0] * total)[i])
-                for i in indices
-                if float(data.get("conf", [0] * total)[i]) >= 0
-            ]
-            confidence = (
-                (sum(confidence_values) / len(confidence_values) / 100.0) if confidence_values else None
-            )
-            blocks.append(
-                Block(
-                    "paragraph",
-                    text,
-                    source={"page": page_number},
-                    confidence=confidence,
-                    metadata={"ocr_engine": "tesseract", "ocr_block": block_number},
-                )
-            )
-    return blocks
+    return ocr_pil_image_tesseract(image, lang=lang, page_number=page_number)
 
 
-def _detect_ocr_engine(requested: str) -> str:
-    requested = (requested or "auto").lower()
-    if requested in {"off", "none"}:
-        return "off"
-    if requested == "tesseract":
-        return "tesseract"
-    if requested == "paddle":
-        return "paddle"
-    try:
-        import paddleocr  # noqa: F401
-        return "paddle"
-    except ImportError:
-        pass
-    try:
-        import pytesseract  # noqa: F401
-        return "tesseract"
-    except ImportError:
-        return "off"
+def _page_needs_ocr(page, native_text: str) -> bool:
+    """Detect scanned or image-dominated PDF pages that need OCR."""
+    images = page.get_images(full=True)
+    if not images:
+        return False
+    if len(native_text) < 40:
+        return True
+    if len(native_text) >= 250:
+        return False
+    page_area = float(page.rect.width * page.rect.height)
+    if page_area <= 0:
+        return False
+    image_area = 0.0
+    for info in images:
+        try:
+            for rect in page.get_image_rects(info[0]):
+                image_area += max(0.0, float(rect.width * rect.height))
+        except Exception:
+            continue
+    return (image_area / page_area) >= 0.35
 
 
 def _remove_repeated_edges(pages: List[List[Block]], document: Document) -> None:
@@ -322,7 +284,7 @@ def convert_pdf(
     path: Path,
     output_assets: Optional[Path] = None,
     ocr: str = "auto",
-    ocr_lang: str = "eng",
+    ocr_lang: str = "vie",
     preview: bool = False,
     password: Optional[str] = None,
     use_structure: bool = True,
@@ -332,7 +294,7 @@ def convert_pdf(
     except ImportError as exc:
         raise RuntimeError("PDF support requires PyMuPDF. Install it with: pip install pymupdf") from exc
 
-    engine = _detect_ocr_engine(ocr)
+    engine = detect_ocr_engine(ocr)
     pdf = fitz.open(path)
     try:
         if pdf.needs_pass:
@@ -358,7 +320,7 @@ def convert_pdf(
             native_text = " ".join(block.text for block in native).strip()
             use_ocr = engine != "off" and (
                 ocr in {"paddle", "tesseract"}
-                or (ocr == "auto" and len(native_text) < 40 and bool(page.get_images(full=True)))
+                or (ocr == "auto" and _page_needs_ocr(page, native_text))
             )
             blocks = native
 

@@ -57,8 +57,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--lang",
-        default="eng",
-        help="OCR language (eng, vie, eng+vie, …). Mapped automatically for Paddle.",
+        default="vie",
+        help="OCR language (vie, eng, eng+vie, …). Default 'vie' also handles English/Latin in PaddleOCR.",
     )
     parser.add_argument(
         "--no-structure",

@@ -39,7 +39,7 @@ def convert_file(
     output_path: str | Path,
     mode: str = "balanced",
     ocr: str = "auto",
-    ocr_lang: str = "eng",
+    ocr_lang: str = "vie",
     export_images: bool = False,
     export_meta: bool = False,
     preview: bool = False,

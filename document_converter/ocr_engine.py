@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import tempfile
 from pathlib import Path
+from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
 from .models import Block
@@ -17,32 +19,113 @@ _paddle_ocr_lang: Optional[str] = None
 _structure_engine = None
 _structure_lang: Optional[str] = None
 
+_PADDLE_LANG_MAP = {
+    "eng": "en",
+    "en": "en",
+    "vie": "vi",
+    "vi": "vi",
+    "chi_sim": "ch",
+    "zh": "ch",
+    "zh_cn": "ch",
+    "ch": "ch",
+    "chi_tra": "chinese_cht",
+    "zh_tw": "chinese_cht",
+    "chinese_cht": "chinese_cht",
+    "jpn": "japan",
+    "ja": "japan",
+    "japan": "japan",
+    "kor": "korean",
+    "ko": "korean",
+    "korean": "korean",
+    "fra": "fr",
+    "fr": "fr",
+    "deu": "german",
+    "de": "german",
+    "german": "german",
+    "spa": "es",
+    "es": "es",
+    "ita": "it",
+    "it": "it",
+    "por": "pt",
+    "pt": "pt",
+    "rus": "ru",
+    "ru": "ru",
+    "tha": "th",
+    "th": "th",
+    "latin": "latin",
+}
+
+_TESSERACT_LANG_MAP = {
+    "en": "eng",
+    "vi": "vie",
+    "ch": "chi_sim",
+    "zh": "chi_sim",
+    "zh_cn": "chi_sim",
+    "chinese_cht": "chi_tra",
+    "zh_tw": "chi_tra",
+    "japan": "jpn",
+    "ja": "jpn",
+    "korean": "kor",
+    "ko": "kor",
+    "fr": "fra",
+    "german": "deu",
+    "de": "deu",
+    "es": "spa",
+    "it": "ita",
+    "pt": "por",
+    "ru": "rus",
+    "th": "tha",
+}
+
+
+def _split_lang_tokens(lang: str) -> List[str]:
+    return [part.strip().lower() for part in re.split(r"[+,]", lang or "vie") if part.strip()]
+
 
 def map_lang_for_paddle(lang: str) -> str:
-    mapping = {
-        "eng": "en",
-        "en": "en",
-        "vie": "vi",
-        "vi": "vi",
-        "chi_sim": "ch",
-        "chi_tra": "chinese_cht",
-        "ch": "ch",
-        "jpn": "japan",
-        "japan": "japan",
-        "kor": "korean",
-        "korean": "korean",
-        "fra": "fr",
-        "fr": "fr",
-        "deu": "german",
-        "german": "german",
-        "spa": "es",
-        "es": "es",
-    }
-    primary = (lang or "eng").split("+")[0].strip().lower()
-    return mapping.get(primary, primary if primary in mapping.values() else "en")
+    """Pick the best single PaddleOCR model covering requested language(s)."""
+    tokens = _split_lang_tokens(lang)
+    if not tokens:
+        return "vi"
+    mapped = [_PADDLE_LANG_MAP.get(tok, tok if tok in _PADDLE_LANG_MAP.values() else "en") for tok in tokens]
+    # Non-English PaddleOCR models (vi, ch, japan, korean, ...) already include ASCII/English.
+    for code in mapped:
+        if code != "en":
+            return code
+    return mapped[0]
 
 
-def get_paddle_ocr(lang: str = "eng"):
+def map_lang_for_tesseract(lang: str) -> str:
+    """Normalize language specification (e.g. 'vi', 'eng+vie') for Tesseract."""
+    tokens = _split_lang_tokens(lang)
+    if not tokens:
+        return "vie"
+    mapped = [_TESSERACT_LANG_MAP.get(tok, tok) for tok in tokens]
+    return "+".join(dict.fromkeys(mapped))
+
+
+def detect_ocr_engine(requested: str) -> str:
+    """Resolve requested OCR engine ('auto' prefers PaddleOCR, falls back to Tesseract)."""
+    requested = (requested or "auto").lower()
+    if requested in {"off", "none"}:
+        return "off"
+    if requested == "tesseract":
+        return "tesseract"
+    if requested == "paddle":
+        return "paddle"
+    try:
+        import paddleocr  # noqa: F401
+        return "paddle"
+    except ImportError:
+        pass
+    try:
+        import pytesseract  # noqa: F401
+        return "tesseract"
+    except ImportError:
+        return "off"
+
+
+def get_paddle_ocr(lang: str = "vie"):
     global _paddle_ocr, _paddle_ocr_lang
     mapped = map_lang_for_paddle(lang)
     if _paddle_ocr is not None and _paddle_ocr_lang == mapped:
@@ -67,7 +150,7 @@ def get_paddle_ocr(lang: str = "eng"):
     return _paddle_ocr
 
 
-def get_structure_engine(lang: str = "eng"):
+def get_structure_engine(lang: str = "vie"):
     """Prefer PPStructureV3; fall back to classic PPStructure."""
     global _structure_engine, _structure_lang
     mapped = map_lang_for_paddle(lang)
@@ -108,46 +191,83 @@ def get_structure_engine(lang: str = "eng"):
         ) from exc
 
 
-def _bbox_center_y(box) -> float:
+def _bbox_rect(box) -> Optional[Tuple[float, float, float, float]]:
+    """Return (x0, y0, x1, y1) from polygon or [x0, y0, x1, y1] bounding box."""
     try:
         if isinstance(box, (list, tuple)) and len(box) >= 2:
             if isinstance(box[0], (list, tuple)):
-                ys = [p[1] for p in box]
-                return sum(ys) / len(ys)
+                xs = [float(p[0]) for p in box]
+                ys = [float(p[1]) for p in box]
+                return (min(xs), min(ys), max(xs), max(ys))
             if len(box) >= 4:
-                return (float(box[1]) + float(box[3])) / 2.0
+                return (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
     except Exception:
         pass
-    return 0.0
+    return None
 
 
-def _bbox_center_x(box) -> float:
-    try:
-        if isinstance(box, (list, tuple)) and len(box) >= 2:
-            if isinstance(box[0], (list, tuple)):
-                xs = [p[0] for p in box]
-                return sum(xs) / len(xs)
-            if len(box) >= 4:
-                return (float(box[0]) + float(box[2])) / 2.0
-    except Exception:
-        pass
-    return 0.0
+def _split_x_columns(
+    items: List[Tuple[str, float, Tuple[float, float, float, float]]],
+    width_hint: float,
+) -> List[List[Tuple[str, float, Tuple[float, float, float, float]]]]:
+    """Split a group of narrow boxes into columns using X-interval gutters."""
+    if len(items) < 4 or width_hint <= 0:
+        return [items]
+    min_gutter = max(30.0, width_hint * 0.04)
+    sorted_by_x = sorted(items, key=lambda item: (item[2][0], item[2][2]))
+    groups: List[List[Tuple[str, float, Tuple[float, float, float, float]]]] = []
+    cur_group: List[Tuple[str, float, Tuple[float, float, float, float]]] = []
+    cur_right = -1.0
+
+    for item in sorted_by_x:
+        x0, _, x1, _ = item[2]
+        if cur_group and (x0 - cur_right) >= min_gutter:
+            groups.append(cur_group)
+            cur_group = [item]
+            cur_right = x1
+        else:
+            cur_group.append(item)
+            cur_right = max(cur_right, x1)
+    if cur_group:
+        groups.append(cur_group)
+
+    # Require at least 2 boxes per column so isolated right-aligned words stay inline.
+    if len(groups) <= 1 or any(len(g) < 2 for g in groups):
+        return [items]
+    return groups
 
 
-def _bbox_top(box) -> float:
-    try:
-        if isinstance(box, (list, tuple)) and len(box) >= 2:
-            if isinstance(box[0], (list, tuple)):
-                return min(p[1] for p in box)
-            if len(box) >= 4:
-                return float(box[1])
-    except Exception:
-        pass
-    return 0.0
+def _cluster_ocr_columns(
+    items: List[Tuple[str, float, Tuple[float, float, float, float]]],
+) -> List[List[Tuple[str, float, Tuple[float, float, float, float]]]]:
+    """Order full-width spans in Y order and split multi-column regions between them."""
+    if not items:
+        return []
+    width_hint = max(rect[2] for _, _, rect in items)
+    if width_hint <= 0:
+        return [items]
+
+    wide_threshold = width_hint * 0.55
+    ordered_by_y = sorted(items, key=lambda item: ((item[2][1] + item[2][3]) / 2.0, item[2][0]))
+    segments: List[List[Tuple[str, float, Tuple[float, float, float, float]]]] = []
+    narrow_band: List[Tuple[str, float, Tuple[float, float, float, float]]] = []
+
+    for item in ordered_by_y:
+        box_width = item[2][2] - item[2][0]
+        if box_width >= wide_threshold:
+            if narrow_band:
+                segments.extend(_split_x_columns(narrow_band, width_hint))
+                narrow_band = []
+            segments.append([item])
+        else:
+            narrow_band.append(item)
+    if narrow_band:
+        segments.extend(_split_x_columns(narrow_band, width_hint))
+    return segments
 
 
-def run_plain_ocr_on_array(img_array, lang: str = "eng") -> List[Block]:
-    """Plain PaddleOCR → ordered paragraph blocks (with multi-column sort)."""
+def run_plain_ocr_on_array(img_array, lang: str = "vie") -> List[Block]:
+    """Plain PaddleOCR → ordered paragraph blocks (line-grouped & multi-column aware)."""
     engine = get_paddle_ocr(lang)
     lines_data: List[Tuple[str, float, Any]] = []
 
@@ -175,70 +295,144 @@ def run_plain_ocr_on_array(img_array, lang: str = "eng") -> List[Block]:
                 box, (text, score) = item[0], item[1]
                 lines_data.append((text, float(score), box))
 
-    if not lines_data:
+    normalized: List[Tuple[str, float, Tuple[float, float, float, float]]] = []
+    for text, score, box in lines_data:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            continue
+        rect = _bbox_rect(box) or (0.0, 0.0, 0.0, 0.0)
+        try:
+            conf = float(score)
+        except Exception:
+            conf = 0.85
+        normalized.append((cleaned, conf, rect))
+
+    if not normalized:
         return []
 
-    # Multi-column aware sort: cluster by x-center then by y
-    width_hint = max((_bbox_center_x(b) for _, _, b in lines_data), default=1000.0) * 2
-    col_threshold = max(80.0, width_hint * 0.25)
-
-    def sort_key(item):
-        text, score, box = item
-        cx = _bbox_center_x(box)
-        cy = _bbox_top(box)
-        # Approximate column index
-        col = int(cx // col_threshold)
-        return (col, cy, cx)
-
-    lines_data.sort(key=sort_key)
+    heights = [rect[3] - rect[1] for _, _, rect in normalized if rect[3] > rect[1]]
+    median_height = median(heights) if heights else 20.0
+    same_line_tol = max(6.0, median_height * 0.55)
+    para_gap_tol = max(12.0, median_height * 1.4)
 
     blocks: List[Block] = []
-    current: List[str] = []
-    scores: List[float] = []
-    last_y: Optional[float] = None
-    last_col: Optional[int] = None
-    y_threshold = 32.0
+    for col_items in _cluster_ocr_columns(normalized):
+        col_items.sort(key=lambda item: ((item[2][1] + item[2][3]) / 2.0, item[2][0]))
+        visual_lines: List[List[Tuple[str, float, Tuple[float, float, float, float]]]] = []
+        for item in col_items:
+            cy = (item[2][1] + item[2][3]) / 2.0
+            if visual_lines:
+                prev_cy = sum((x[2][1] + x[2][3]) / 2.0 for x in visual_lines[-1]) / len(visual_lines[-1])
+                if abs(cy - prev_cy) <= same_line_tol:
+                    visual_lines[-1].append(item)
+                    continue
+            visual_lines.append([item])
 
-    for text, score, box in lines_data:
-        text = (text or "").strip()
-        if not text:
-            continue
-        cy = _bbox_top(box)
-        cx = _bbox_center_x(box)
-        col = int(cx // col_threshold)
-        if (
-            last_y is not None
-            and last_col is not None
-            and (col != last_col or abs(cy - last_y) > y_threshold)
-            and current
-        ):
-            conf = sum(scores) / len(scores) if scores else None
+        para_lines: List[str] = []
+        para_scores: List[float] = []
+        para_rects: List[Tuple[float, float, float, float]] = []
+        prev_bottom: Optional[float] = None
+
+        for line in visual_lines:
+            line.sort(key=lambda item: item[2][0])
+            line_top = min(item[2][1] for item in line)
+            line_bottom = max(item[2][3] for item in line)
+            line_text = " ".join(item[0] for item in line)
+
+            if prev_bottom is not None and (line_top - prev_bottom) > para_gap_tol and para_lines:
+                bbox = [
+                    round(min(r[0] for r in para_rects), 1),
+                    round(min(r[1] for r in para_rects), 1),
+                    round(max(r[2] for r in para_rects), 1),
+                    round(max(r[3] for r in para_rects), 1),
+                ]
+                blocks.append(
+                    Block(
+                        "paragraph",
+                        " ".join(para_lines),
+                        source={"bbox": bbox} if any(bbox) else {},
+                        confidence=sum(para_scores) / len(para_scores) if para_scores else None,
+                        metadata={"ocr_engine": "paddle"},
+                    )
+                )
+                para_lines, para_scores, para_rects = [], [], []
+
+            para_lines.append(line_text)
+            para_scores.extend(item[1] for item in line)
+            para_rects.extend(item[2] for item in line)
+            prev_bottom = line_bottom
+
+        if para_lines:
+            bbox = [
+                round(min(r[0] for r in para_rects), 1),
+                round(min(r[1] for r in para_rects), 1),
+                round(max(r[2] for r in para_rects), 1),
+                round(max(r[3] for r in para_rects), 1),
+            ]
             blocks.append(
                 Block(
                     "paragraph",
-                    " ".join(current),
-                    confidence=conf,
+                    " ".join(para_lines),
+                    source={"bbox": bbox} if any(bbox) else {},
+                    confidence=sum(para_scores) / len(para_scores) if para_scores else None,
                     metadata={"ocr_engine": "paddle"},
                 )
             )
-            current, scores = [], []
-        current.append(text)
-        try:
-            scores.append(float(score))
-        except Exception:
-            scores.append(0.85)
-        last_y, last_col = cy, col
+    return blocks
 
-    if current:
-        conf = sum(scores) / len(scores) if scores else None
-        blocks.append(
-            Block(
-                "paragraph",
-                " ".join(current),
-                confidence=conf,
-                metadata={"ocr_engine": "paddle"},
+
+def ocr_pil_image_tesseract(
+    image,
+    lang: str = "vie",
+    page_number: Optional[int] = None,
+) -> List[Block]:
+    """Run Tesseract OCR on a PIL image and return ordered paragraph blocks with confidence."""
+    try:
+        import pytesseract
+    except ImportError as exc:
+        raise RuntimeError("Tesseract OCR requires pytesseract and Pillow") from exc
+
+    tess_lang = map_lang_for_tesseract(lang)
+    data = pytesseract.image_to_data(image, lang=tess_lang, output_type=pytesseract.Output.DICT)
+    total = len(data.get("text", []))
+    groups: Dict[Tuple[int, int], List[int]] = {}
+    for index in range(total):
+        if str(data.get("text", [""] * total)[index] or "").strip():
+            key = (
+                int(data.get("block_num", [0] * total)[index] or 0),
+                int(data.get("line_num", [0] * total)[index] or 0),
             )
-        )
+            groups.setdefault(key, []).append(index)
+
+    source_base = {"page": page_number} if page_number is not None else {}
+    blocks: List[Block] = []
+    for (block_number, _), indices in sorted(
+        groups.items(),
+        key=lambda item: (
+            item[0][0],
+            min(int(data.get("top", [0] * total)[i] or 0) for i in item[1]),
+        ),
+    ):
+        indices.sort(key=lambda i: int(data.get("left", [0] * total)[i] or 0))
+        text = " ".join(str(data["text"][i]) for i in indices).strip()
+        if text:
+            confidence_values = [
+                float(data.get("conf", [0] * total)[i])
+                for i in indices
+                if float(data.get("conf", [0] * total)[i]) >= 0
+            ]
+            confidence = (
+                (sum(confidence_values) / len(confidence_values) / 100.0) if confidence_values else None
+            )
+            blocks.append(
+                Block(
+                    "paragraph",
+                    text,
+                    source=dict(source_base),
+                    confidence=confidence,
+                    metadata={"ocr_engine": "tesseract", "ocr_block": block_number},
+                )
+            )
     return blocks
 
 
@@ -267,8 +461,10 @@ def structure_result_to_blocks(result: Any, page_number: Optional[int] = None) -
     # Modern PPStructureV3 often exposes markdown / structured regions
     if hasattr(result, "markdown") or (isinstance(result, dict) and "markdown" in result):
         md = getattr(result, "markdown", None) or (result.get("markdown") if isinstance(result, dict) else None)
+        if isinstance(md, dict):
+            md = md.get("markdown_texts") or md.get("text") or ""
         if md and isinstance(md, str) and md.strip():
-            # Keep as a single rich block; renderer will still produce clean MD
+            # Keep as pre-formatted Markdown block; renderer will pass it through unescaped
             blocks.append(
                 Block(
                     "paragraph",
@@ -369,8 +565,8 @@ def structure_result_to_blocks(result: Any, page_number: Optional[int] = None) -
                 )
             continue
 
-        # Title / heading
-        if any(k in typ for k in ("title", "heading", "header", "doc_title", "paragraph_title")):
+        # Title / heading (do not promote running page 'header' to heading)
+        if any(k in typ for k in ("title", "heading", "doc_title", "paragraph_title", "section_header")):
             text = _extract_text_from_res(res)
             if text:
                 level = 1 if "doc_title" in typ or typ == "title" else 2
@@ -434,15 +630,13 @@ def _extract_text_from_res(res) -> str:
 
 
 def _looks_like_list(text: str) -> bool:
-    import re
-
     return any(
         re.match(r"^\s*(?:[•●▪◦·-]|\d+[.)]|[A-Za-z][.)])\s+", line)
         for line in text.splitlines()
     )
 
 
-def run_structure_on_image(img_array_or_path, lang: str = "eng", page_number: Optional[int] = None) -> List[Block]:
+def run_structure_on_image(img_array_or_path, lang: str = "vie", page_number: Optional[int] = None) -> List[Block]:
     """Full layout + table + reading-order analysis."""
     engine = get_structure_engine(lang)
 

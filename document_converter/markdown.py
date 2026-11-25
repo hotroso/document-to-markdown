@@ -76,9 +76,14 @@ def render_document(document: Document, mode: str = "balanced") -> str:
             level = int(block.metadata.get("level", 2))
             lines.extend(["#" * max(1, min(level, 6)) + " " + escape_inline(block.text), ""])
         elif block.kind == "paragraph":
-            text = re.sub(r"[ \t]+", " ", block.text.replace("\r", "")).strip()
-            if text:
-                lines.extend([escape_inline(text), ""])
+            if block.metadata.get("format") == "markdown":
+                text = block.text.strip()
+                if text:
+                    lines.extend([text, ""])
+            else:
+                text = re.sub(r"[ \t]+", " ", block.text.replace("\r", "")).strip()
+                if text:
+                    lines.extend([escape_inline(text), ""])
         elif block.kind == "list":
             for item in block.text.splitlines():
                 item = item.strip()
