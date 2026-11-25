@@ -18,7 +18,7 @@ Designed for personal AI / RAG workflows where layouts are not fixed in advance.
 | **Image** | Full layout analysis (PP-Structure) or plain OCR → structured Markdown. |
 | **Excel** | Multi-region sheets, merged cells, formula cached values + optional LibreOffice recalculation. |
 
-Shared Markdown renderer (`balanced` / `fidelity` / `ai`) + `.meta.json` sidecar with coordinates & confidence.
+Shared Markdown renderer (`balanced` / `fidelity` / `ai`), with optional `_assets` image export (`--assets`) and `.meta.json` sidecar (`--meta`).
 
 Everything runs locally (PaddleOCR may download models on first use).
 
@@ -67,7 +67,8 @@ python -m document_converter.cli report.xlsx -o report.md
 | `--no-structure` | flag | Disable PP-Structure layout/table analysis |
 | `--mode` | `balanced`, `fidelity`, `ai` | Markdown style |
 | `--preview` | flag | First 3 PDF pages only |
-| `--no-images` | flag | Skip PDF image export |
+| `--assets`, `--images` | flag | Export extracted PDF images into `_assets` directory |
+| `--meta` | flag | Export `.meta.json` metadata sidecar |
 | `--no-recalculate` | flag | Skip LibreOffice formula recalc |
 | `-v` | flag | Verbose logging |
 

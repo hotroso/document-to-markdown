@@ -40,13 +40,14 @@ def convert_file(
     mode: str = "balanced",
     ocr: str = "auto",
     ocr_lang: str = "eng",
-    export_images: bool = True,
+    export_images: bool = False,
+    export_meta: bool = False,
     preview: bool = False,
     password: Optional[str] = None,
     recalculate: bool = True,
     use_structure: bool = True,
 ) -> Path:
-    """Convert one PDF, image or Excel file and write Markdown plus a metadata sidecar."""
+    """Convert one PDF, image or Excel file to Markdown, optionally exporting assets and metadata."""
     source = Path(input_path)
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -84,8 +85,9 @@ def convert_file(
         raise RuntimeError(f"Unsupported input type: {source.suffix or '(no extension)'}")
 
     target.write_text(render_document(document, mode=mode), encoding="utf-8")
-    target.with_suffix(".meta.json").write_text(
-        json.dumps(_metadata(document), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    if export_meta:
+        target.with_suffix(".meta.json").write_text(
+            json.dumps(_metadata(document), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return target

@@ -66,9 +66,25 @@ def _parser() -> argparse.ArgumentParser:
         help="Disable PP-Structure layout/table analysis (use plain OCR only)",
     )
     parser.add_argument(
-        "--no-images",
+        "--assets",
+        "--images",
+        dest="export_images",
         action="store_true",
-        help="Do not export images extracted from PDF",
+        default=False,
+        help="Export images extracted from PDF into an _assets directory",
+    )
+    parser.add_argument(
+        "--no-images",
+        dest="export_images",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--meta",
+        dest="export_meta",
+        action="store_true",
+        default=False,
+        help="Export machine-readable .meta.json sidecar file",
     )
     parser.add_argument(
         "--preview",
@@ -122,7 +138,8 @@ def main(argv: List[str] | None = None) -> int:
                 mode=args.mode,
                 ocr=args.ocr,
                 ocr_lang=args.lang,
-                export_images=not args.no_images,
+                export_images=args.export_images,
+                export_meta=args.export_meta,
                 preview=args.preview,
                 password=password,
                 recalculate=not args.no_recalculate,
