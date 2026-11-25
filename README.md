@@ -47,6 +47,8 @@ pip install -e ".[all]"
 
 > **Note:** On the first OCR / structure run, PaddleOCR automatically downloads detection, recognition, and layout models (a few hundred MB).
 
+For detailed workflows, troubleshooting, and examples, see the [Usage Guide](USAGE.md).
+
 ## Usage
 
 After installation, you can run either `document-to-markdown` or `python -m document_converter.cli`.
@@ -152,3 +154,7 @@ When a workbook contains formulas, the converter resolves cell values in order:
 
 ### 0.1.0
 - Initial foundation (PDF + Excel + Tesseract)
+
+## License
+
+Released under the [MIT License](LICENSE).
