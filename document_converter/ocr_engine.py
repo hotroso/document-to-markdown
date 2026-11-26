@@ -5,7 +5,9 @@ from __future__ import annotations
 import inspect
 import io
 import logging
+import os
 import re
+import sys
 import tempfile
 from pathlib import Path
 from statistics import median
@@ -17,8 +19,11 @@ logger = logging.getLogger(__name__)
 
 _paddle_ocr = None
 _paddle_ocr_lang: Optional[str] = None
+_paddle_ocr_mkldnn_disabled: bool = False
 _structure_engine = None
 _structure_lang: Optional[str] = None
+_structure_mkldnn_disabled: bool = False
+_force_disable_mkldnn: bool = False
 
 _PADDLE_LANG_MAP = {
     "eng": "en",
@@ -105,6 +110,49 @@ def map_lang_for_tesseract(lang: str) -> str:
     return "+".join(dict.fromkeys(mapped))
 
 
+def _env_flag_bool(name: str) -> Optional[bool]:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return None
+    val = raw.strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _should_disable_mkldnn() -> bool:
+    """Disable oneDNN/MKLDNN by default on Windows (avoids Paddle 3.3 PIR bug) or when requested."""
+    if _force_disable_mkldnn:
+        return True
+    env_pdx = _env_flag_bool("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT")
+    if env_pdx is not None:
+        return not env_pdx
+    env_flag = _env_flag_bool("FLAGS_use_mkldnn")
+    if env_flag is not None:
+        return not env_flag
+    return sys.platform == "win32"
+
+
+def _prepare_paddle_env(force_disable_mkldnn: bool = False) -> None:
+    """Configure PaddleX/Paddle env vars before importing paddleocr."""
+    if force_disable_mkldnn:
+        os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+        os.environ["FLAGS_use_mkldnn"] = "0"
+    elif _should_disable_mkldnn():
+        os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "0")
+        os.environ.setdefault("FLAGS_use_mkldnn", "0")
+
+
+def _is_pir_mkldnn_error(exc: BaseException) -> bool:
+    """Detect PaddlePaddle 3.x PIR -> oneDNN/MKLDNN runtime incompatibility errors."""
+    msg = str(exc)
+    return "ConvertPirAttribute2RuntimeAttribute" in msg or (
+        "onednn" in msg.lower() and "pir" in msg.lower()
+    )
+
+
 def detect_ocr_engine(requested: str) -> str:
     """Resolve requested OCR engine ('auto' prefers PaddleOCR, falls back to Tesseract)."""
     requested = (requested or "auto").lower()
@@ -115,6 +163,7 @@ def detect_ocr_engine(requested: str) -> str:
     if requested == "paddle":
         return "paddle"
     try:
+        _prepare_paddle_env()
         import paddleocr  # noqa: F401
         return "paddle"
     except ImportError:
@@ -183,46 +232,90 @@ def _init_with_fallback(factory: Any, candidates: List[Dict[str, Any]]):
     raise last_exc
 
 
-def get_paddle_ocr(lang: str = "vie"):
-    global _paddle_ocr, _paddle_ocr_lang
+def get_paddle_ocr(lang: str = "vie", disable_mkldnn: Optional[bool] = None):
+    global _paddle_ocr, _paddle_ocr_lang, _paddle_ocr_mkldnn_disabled, _force_disable_mkldnn
     mapped = map_lang_for_paddle(lang)
-    if _paddle_ocr is not None and _paddle_ocr_lang == mapped:
+    effective_disable_mkldnn = (
+        _should_disable_mkldnn() if disable_mkldnn is None else bool(disable_mkldnn)
+    )
+    if (
+        _paddle_ocr is not None
+        and _paddle_ocr_lang == mapped
+        and (not effective_disable_mkldnn or _paddle_ocr_mkldnn_disabled)
+    ):
         return _paddle_ocr
+
+    _prepare_paddle_env(force_disable_mkldnn=bool(disable_mkldnn))
     import paddleocr
     from paddleocr import PaddleOCR
 
-    if _is_paddleocr_v3(paddleocr, PaddleOCR):
+    is_v3 = _is_paddleocr_v3(paddleocr, PaddleOCR)
+    if is_v3:
         _silence_paddle_logger(paddleocr)
-        candidates = [
-            {
-                "lang": mapped,
-                "use_doc_orientation_classify": False,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": False,
-            },
-            {"lang": mapped},
-        ]
+        base_v3 = {
+            "lang": mapped,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        }
+        if effective_disable_mkldnn:
+            candidates = [
+                {**base_v3, "enable_mkldnn": False},
+                {"lang": mapped, "enable_mkldnn": False},
+                base_v3,
+                {"lang": mapped},
+            ]
+        else:
+            candidates = [base_v3, {"lang": mapped}]
     else:
         # PaddleOCR 2.x fallback (supports show_log=False and use_angle_cls)
-        candidates = [
-            {"use_angle_cls": True, "lang": mapped, "show_log": False, "use_gpu": False},
+        base_v2 = {"use_angle_cls": True, "lang": mapped, "show_log": False, "use_gpu": False}
+        candidates = (
+            [{**base_v2, "enable_mkldnn": False}] if effective_disable_mkldnn else []
+        ) + [
+            base_v2,
             {"use_angle_cls": True, "lang": mapped, "show_log": False},
             {"use_angle_cls": True, "lang": mapped},
             {"lang": mapped},
         ]
 
-    _paddle_ocr = _init_with_fallback(PaddleOCR, candidates)
+    try:
+        _paddle_ocr = _init_with_fallback(PaddleOCR, candidates)
+    except Exception as exc:
+        if not effective_disable_mkldnn and _is_pir_mkldnn_error(exc):
+            logger.warning(
+                "PaddleOCR init hit PIR/oneDNN error (%s); retrying with enable_mkldnn=False.",
+                exc,
+            )
+            _force_disable_mkldnn = True
+            return get_paddle_ocr(lang, disable_mkldnn=True)
+        raise
+
     _paddle_ocr_lang = mapped
-    logger.info("Loaded PaddleOCR (lang=%s)", mapped)
+    _paddle_ocr_mkldnn_disabled = effective_disable_mkldnn
+    logger.info(
+        "Loaded PaddleOCR (lang=%s, mkldnn=%s)",
+        mapped,
+        "off" if effective_disable_mkldnn else "default",
+    )
     return _paddle_ocr
 
 
-def get_structure_engine(lang: str = "vie"):
+def get_structure_engine(lang: str = "vie", disable_mkldnn: Optional[bool] = None):
     """Prefer PPStructureV3; fall back to classic PPStructure."""
-    global _structure_engine, _structure_lang
+    global _structure_engine, _structure_lang, _structure_mkldnn_disabled, _force_disable_mkldnn
     mapped = map_lang_for_paddle(lang)
-    if _structure_engine is not None and _structure_lang == mapped:
+    effective_disable_mkldnn = (
+        _should_disable_mkldnn() if disable_mkldnn is None else bool(disable_mkldnn)
+    )
+    if (
+        _structure_engine is not None
+        and _structure_lang == mapped
+        and (not effective_disable_mkldnn or _structure_mkldnn_disabled)
+    ):
         return _structure_engine
+
+    _prepare_paddle_env(force_disable_mkldnn=bool(disable_mkldnn))
 
     # Try modern pipeline first (PaddleOCR 3.x; no show_log parameter)
     try:
@@ -230,11 +323,28 @@ def get_structure_engine(lang: str = "vie"):
         from paddleocr import PPStructureV3
 
         _silence_paddle_logger(paddleocr)
-        _structure_engine = _init_with_fallback(PPStructureV3, [{"lang": mapped}, {}])
+        v3_candidates = (
+            [{"lang": mapped, "enable_mkldnn": False}, {"enable_mkldnn": False}]
+            if effective_disable_mkldnn
+            else []
+        ) + [{"lang": mapped}, {}]
+        _structure_engine = _init_with_fallback(PPStructureV3, v3_candidates)
         _structure_lang = mapped
-        logger.info("Loaded PPStructureV3 (lang=%s)", mapped)
+        _structure_mkldnn_disabled = effective_disable_mkldnn
+        logger.info(
+            "Loaded PPStructureV3 (lang=%s, mkldnn=%s)",
+            mapped,
+            "off" if effective_disable_mkldnn else "default",
+        )
         return _structure_engine
     except Exception as exc:
+        if not effective_disable_mkldnn and _is_pir_mkldnn_error(exc):
+            logger.warning(
+                "PPStructureV3 init hit PIR/oneDNN error (%s); retrying with enable_mkldnn=False.",
+                exc,
+            )
+            _force_disable_mkldnn = True
+            return get_structure_engine(lang, disable_mkldnn=True)
         logger.debug("PPStructureV3 unavailable: %s", exc)
 
     try:
@@ -243,9 +353,17 @@ def get_structure_engine(lang: str = "vie"):
 
         if _is_paddleocr_v3(paddleocr, PPStructure):
             _silence_paddle_logger(paddleocr)
-            structure_candidates = [{"lang": mapped}, {}]
+            structure_candidates = (
+                [{"lang": mapped, "enable_mkldnn": False}, {"enable_mkldnn": False}]
+                if effective_disable_mkldnn
+                else []
+            ) + [{"lang": mapped}, {}]
         else:
-            structure_candidates = [
+            structure_candidates = (
+                [{"show_log": False, "lang": mapped, "enable_mkldnn": False}]
+                if effective_disable_mkldnn
+                else []
+            ) + [
                 {"show_log": False, "lang": mapped},
                 {"lang": mapped},
                 {"show_log": False},
@@ -253,6 +371,7 @@ def get_structure_engine(lang: str = "vie"):
             ]
         _structure_engine = _init_with_fallback(PPStructure, structure_candidates)
         _structure_lang = mapped
+        _structure_mkldnn_disabled = effective_disable_mkldnn
         logger.info("Loaded classic PPStructure")
         return _structure_engine
     except Exception as exc:
@@ -262,13 +381,70 @@ def get_structure_engine(lang: str = "vie"):
         ) from exc
 
 
+def _to_list(value: Any) -> Optional[List[Any]]:
+    """Safely convert a sequence or NumPy-like array to a Python list without truthiness checks."""
+    if value is None:
+        return None
+    if hasattr(value, "tolist"):
+        converted = value.tolist()
+        return converted if isinstance(converted, list) else [converted]
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    try:
+        return list(value)
+    except TypeError:
+        return None
+
+
+def _get_mapping_or_attr(obj: Any, key: str) -> Any:
+    if isinstance(obj, dict) and key in obj:
+        return obj[key]
+    if hasattr(obj, key):
+        return getattr(obj, key)
+    if hasattr(obj, "get"):
+        try:
+            return obj.get(key)
+        except Exception:
+            pass
+    return None
+
+
+def _first_non_empty_list(obj: Any, *keys: str) -> List[Any]:
+    for key in keys:
+        val = _to_list(_get_mapping_or_attr(obj, key))
+        if val is not None and len(val) > 0:
+            return val
+    return []
+
+
+def _first_present(obj: Any, *keys: str) -> Any:
+    """Return the first non-None, non-empty field without calling bool() on NumPy arrays."""
+    for key in keys:
+        val = _get_mapping_or_attr(obj, key)
+        if val is None:
+            continue
+        if hasattr(val, "size"):
+            if int(val.size) > 0:
+                return val
+        elif isinstance(val, (list, tuple, dict, str)):
+            if len(val) > 0:
+                return val
+        else:
+            return val
+    return None
+
+
 def _bbox_rect(box) -> Optional[Tuple[float, float, float, float]]:
     """Return (x0, y0, x1, y1) from polygon or [x0, y0, x1, y1] bounding box."""
     try:
+        if hasattr(box, "tolist"):
+            box = box.tolist()
         if isinstance(box, (list, tuple)) and len(box) >= 2:
-            if isinstance(box[0], (list, tuple)):
-                xs = [float(p[0]) for p in box]
-                ys = [float(p[1]) for p in box]
+            first = box[0].tolist() if hasattr(box[0], "tolist") else box[0]
+            if isinstance(first, (list, tuple)):
+                pts = [p.tolist() if hasattr(p, "tolist") else p for p in box]
+                xs = [float(p[0]) for p in pts]
+                ys = [float(p[1]) for p in pts]
                 return (min(xs), min(ys), max(xs), max(ys))
             if len(box) >= 4:
                 return (float(box[0]), float(box[1]), float(box[2]), float(box[3]))
@@ -339,29 +515,50 @@ def _cluster_ocr_columns(
 
 def run_plain_ocr_on_array(img_array, lang: str = "vie") -> List[Block]:
     """Plain PaddleOCR → ordered paragraph blocks (line-grouped & multi-column aware)."""
+    global _force_disable_mkldnn
     engine = get_paddle_ocr(lang)
     lines_data: List[Tuple[str, float, Any]] = []
 
     if hasattr(engine, "predict"):
-        preds = engine.predict(img_array)
-        if preds:
-            res = preds[0]
-            if hasattr(res, "rec_texts"):
-                texts = list(res.rec_texts or [])
-                scores = list(res.rec_scores or [0.9] * len(texts))
-                boxes = list(getattr(res, "rec_boxes", None) or getattr(res, "dt_polys", None) or [])
-            elif isinstance(res, dict):
-                texts = res.get("rec_texts") or []
-                scores = res.get("rec_scores") or [0.9] * len(texts)
-                boxes = res.get("rec_boxes") or res.get("dt_polys") or []
-            else:
-                texts, scores, boxes = [], [], []
+        try:
+            preds = engine.predict(img_array)
+        except Exception as exc:
+            if not _is_pir_mkldnn_error(exc):
+                raise
+            logger.warning(
+                "PaddleOCR predict hit PIR/oneDNN error (%s); retrying with enable_mkldnn=False.",
+                exc,
+            )
+            _force_disable_mkldnn = True
+            engine = get_paddle_ocr(lang, disable_mkldnn=True)
+            preds = engine.predict(img_array)
+        preds_list = list(preds) if preds is not None else []
+        if preds_list:
+            res = preds_list[0]
+            texts = _first_non_empty_list(res, "rec_texts")
+            scores = _first_non_empty_list(res, "rec_scores")
+            boxes = _first_non_empty_list(res, "rec_boxes", "dt_polys", "rec_polys")
+            if len(scores) < len(texts):
+                scores = scores + [0.9] * (len(texts) - len(scores))
+            if len(boxes) < len(texts):
+                boxes = boxes + [None] * (len(texts) - len(boxes))
             lines_data = list(zip(texts, scores, boxes))
     else:
-        ocr_out = engine.ocr(img_array, cls=True)
-        if ocr_out and ocr_out[0]:
+        try:
+            ocr_out = engine.ocr(img_array, cls=True)
+        except Exception as exc:
+            if not _is_pir_mkldnn_error(exc):
+                raise
+            logger.warning(
+                "PaddleOCR ocr hit PIR/oneDNN error (%s); retrying with enable_mkldnn=False.",
+                exc,
+            )
+            _force_disable_mkldnn = True
+            engine = get_paddle_ocr(lang, disable_mkldnn=True)
+            ocr_out = engine.ocr(img_array, cls=True)
+        if ocr_out is not None and len(ocr_out) > 0 and ocr_out[0] is not None:
             for item in ocr_out[0]:
-                if not item:
+                if item is None:
                     continue
                 box, (text, score) = item[0], item[1]
                 lines_data.append((text, float(score), box))
@@ -530,8 +727,8 @@ def structure_result_to_blocks(result: Any, page_number: Optional[int] = None) -
     source_base = {"page": page_number} if page_number is not None else {}
 
     # Modern PPStructureV3 often exposes markdown / structured regions
-    if hasattr(result, "markdown") or (isinstance(result, dict) and "markdown" in result):
-        md = getattr(result, "markdown", None) or (result.get("markdown") if isinstance(result, dict) else None)
+    md = _get_mapping_or_attr(result, "markdown")
+    if md is not None:
         if isinstance(md, dict):
             md = md.get("markdown_texts") or md.get("text") or ""
         if md and isinstance(md, str) and md.strip():
@@ -550,27 +747,20 @@ def structure_result_to_blocks(result: Any, page_number: Optional[int] = None) -
     # Classic list-of-dict layout
     items = result
     if isinstance(result, dict):
-        items = result.get("res") or result.get("layout") or result.get("boxes") or [result]
+        extracted = _first_present(result, "res", "layout", "boxes")
+        items = extracted if extracted is not None else [result]
+    if hasattr(items, "tolist"):
+        items = items.tolist()
     if not isinstance(items, list):
         items = [items]
 
     # Sort by reading order: top → bottom, left → right (multi-column friendly)
     def item_key(it):
-        bbox = None
-        if isinstance(it, dict):
-            bbox = it.get("bbox") or it.get("coordinate") or it.get("box")
-        elif hasattr(it, "bbox"):
-            bbox = it.bbox
-        if bbox is None:
+        bbox = _first_present(it, "bbox", "coordinate", "box")
+        rect = _bbox_rect(bbox)
+        if rect is None:
             return (0.0, 0.0)
-        try:
-            if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and not isinstance(bbox[0], (list, tuple)):
-                return (float(bbox[1]), float(bbox[0]))
-            if isinstance(bbox, (list, tuple)) and bbox and isinstance(bbox[0], (list, tuple)):
-                return (min(p[1] for p in bbox), min(p[0] for p in bbox))
-        except Exception:
-            pass
-        return (0.0, 0.0)
+        return (rect[1], rect[0])
 
     try:
         items = sorted(items, key=item_key)
@@ -581,16 +771,15 @@ def structure_result_to_blocks(result: Any, page_number: Optional[int] = None) -
         if not isinstance(it, dict):
             continue
         typ = (it.get("type") or it.get("label") or "text").lower()
-        bbox = it.get("bbox") or it.get("coordinate")
+        bbox = _first_present(it, "bbox", "coordinate", "box")
         res = it.get("res")
-        conf = it.get("score") or it.get("confidence")
+        conf = it.get("score")
+        if conf is None:
+            conf = it.get("confidence")
         source = dict(source_base)
-        if bbox is not None:
-            try:
-                if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 and not isinstance(bbox[0], (list, tuple)):
-                    source["bbox"] = [round(float(x), 1) for x in bbox[:4]]
-            except Exception:
-                pass
+        rect = _bbox_rect(bbox)
+        if rect is not None:
+            source["bbox"] = [round(v, 1) for v in rect]
 
         # Table
         if "table" in typ:
@@ -709,11 +898,23 @@ def _looks_like_list(text: str) -> bool:
 
 def run_structure_on_image(img_array_or_path, lang: str = "vie", page_number: Optional[int] = None) -> List[Block]:
     """Full layout + table + reading-order analysis."""
+    global _force_disable_mkldnn
     engine = get_structure_engine(lang)
 
     # PPStructureV3
     if hasattr(engine, "predict"):
-        outputs = engine.predict(img_array_or_path)
+        try:
+            outputs = engine.predict(img_array_or_path)
+        except Exception as exc:
+            if not _is_pir_mkldnn_error(exc):
+                raise
+            logger.warning(
+                "PP-Structure predict hit PIR/oneDNN error (%s); retrying with enable_mkldnn=False.",
+                exc,
+            )
+            _force_disable_mkldnn = True
+            engine = get_structure_engine(lang, disable_mkldnn=True)
+            outputs = engine.predict(img_array_or_path)
         blocks: List[Block] = []
         for res in outputs or []:
             blocks.extend(structure_result_to_blocks(res, page_number=page_number))
@@ -722,7 +923,18 @@ def run_structure_on_image(img_array_or_path, lang: str = "vie", page_number: Op
 
     # Classic PPStructure callable
     if callable(engine):
-        result = engine(img_array_or_path)
+        try:
+            result = engine(img_array_or_path)
+        except Exception as exc:
+            if not _is_pir_mkldnn_error(exc):
+                raise
+            logger.warning(
+                "PP-Structure call hit PIR/oneDNN error (%s); retrying with enable_mkldnn=False.",
+                exc,
+            )
+            _force_disable_mkldnn = True
+            engine = get_structure_engine(lang, disable_mkldnn=True)
+            result = engine(img_array_or_path)
         return structure_result_to_blocks(result, page_number=page_number)
 
     return []

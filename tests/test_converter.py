@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import types
 from pathlib import Path
@@ -18,6 +19,7 @@ from document_converter.ocr_engine import (
     map_lang_for_tesseract,
     ocr_pil_image_tesseract,
     run_plain_ocr_on_array,
+    run_structure_on_image,
     structure_result_to_blocks,
 )
 from document_converter.pdf_adapter import _page_needs_ocr
@@ -153,8 +155,20 @@ def test_page_needs_ocr_and_tesseract_lang() -> None:
 def _reset_ocr_singletons() -> None:
     ocr_engine._paddle_ocr = None
     ocr_engine._paddle_ocr_lang = None
+    ocr_engine._paddle_ocr_mkldnn_disabled = False
     ocr_engine._structure_engine = None
     ocr_engine._structure_lang = None
+    ocr_engine._structure_mkldnn_disabled = False
+    ocr_engine._force_disable_mkldnn = False
+
+
+def _clean_mkldnn_env():
+    cleaned = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in {"PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "FLAGS_use_mkldnn"}
+    }
+    return patch.dict(os.environ, cleaned, clear=True)
 
 
 def test_get_paddle_ocr_v3_omits_show_log() -> None:
@@ -172,7 +186,11 @@ def test_get_paddle_ocr_v3_omits_show_log() -> None:
     fake_mod = types.SimpleNamespace(__version__="3.0.1", PaddleOCR=FakePaddleOCRv3)
     _reset_ocr_singletons()
     try:
-        with patch.dict(sys.modules, {"paddleocr": fake_mod}):
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
             engine = get_paddle_ocr("vie")
         assert isinstance(engine, FakePaddleOCRv3)
         assert len(calls) == 1
@@ -203,7 +221,11 @@ def test_get_paddle_ocr_v3_fallback_on_value_error_and_without_version() -> None
     fake_mod = types.SimpleNamespace(PaddleOCR=FakeStrictPaddleOCRv3)
     _reset_ocr_singletons()
     try:
-        with patch.dict(sys.modules, {"paddleocr": fake_mod}):
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
             engine = get_paddle_ocr("eng")
         assert isinstance(engine, FakeStrictPaddleOCRv3)
         assert len(calls) == 2
@@ -226,7 +248,11 @@ def test_get_paddle_ocr_v2_keeps_show_log_fallback() -> None:
     fake_mod = types.SimpleNamespace(__version__="2.9.1", PaddleOCR=FakePaddleOCRv2)
     _reset_ocr_singletons()
     try:
-        with patch.dict(sys.modules, {"paddleocr": fake_mod}):
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
             engine = get_paddle_ocr("vie")
         assert isinstance(engine, FakePaddleOCRv2)
         assert calls == [
@@ -250,7 +276,11 @@ def test_get_paddle_ocr_v2_keeps_show_log_fallback() -> None:
     fake_mod2 = types.SimpleNamespace(__version__="2.8.1", PaddleOCR=FakePaddleOCRv2NoShowLog)
     _reset_ocr_singletons()
     try:
-        with patch.dict(sys.modules, {"paddleocr": fake_mod2}):
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod2}),
+        ):
             engine = get_paddle_ocr("eng")
         assert isinstance(engine, FakePaddleOCRv2NoShowLog)
         assert calls[-1] == {"use_angle_cls": True, "lang": "en"}
@@ -270,7 +300,11 @@ def test_get_structure_engine_v3_and_v2_fallbacks() -> None:
     fake_v3 = types.SimpleNamespace(__version__="3.0.0", PPStructureV3=FakePPStructureV3)
     _reset_ocr_singletons()
     try:
-        with patch.dict(sys.modules, {"paddleocr": fake_v3}):
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_v3}),
+        ):
             engine = get_structure_engine("vie")
         assert isinstance(engine, FakePPStructureV3)
         assert v3_calls == [{"lang": "vi"}, {}]
@@ -286,9 +320,245 @@ def test_get_structure_engine_v3_and_v2_fallbacks() -> None:
     fake_v2 = types.SimpleNamespace(__version__="2.7.3", PPStructure=FakePPStructureV2)
     _reset_ocr_singletons()
     try:
-        with patch.dict(sys.modules, {"paddleocr": fake_v2}):
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_v2}),
+        ):
             engine = get_structure_engine("vie")
         assert isinstance(engine, FakePPStructureV2)
         assert v2_calls == [{"show_log": False, "lang": "vi"}]
     finally:
         _reset_ocr_singletons()
+
+
+def test_windows_disables_mkldnn_by_default_and_honors_env_overrides() -> None:
+    ocr_calls = []
+    struct_calls = []
+
+    class FakePaddleOCRv3:
+        def __init__(self, **kwargs):
+            ocr_calls.append(kwargs)
+
+        def predict(self, img):
+            return []
+
+    class FakePPStructureV3:
+        def __init__(self, **kwargs):
+            struct_calls.append(kwargs)
+
+        def predict(self, img):
+            return []
+
+    fake_mod = types.SimpleNamespace(
+        __version__="3.3.0",
+        PaddleOCR=FakePaddleOCRv3,
+        PPStructureV3=FakePPStructureV3,
+    )
+
+    # On Windows with no env overrides: proactively sets PaddleX env & passes enable_mkldnn=False
+    _reset_ocr_singletons()
+    try:
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "win32"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
+            get_paddle_ocr("vie")
+            get_structure_engine("vie")
+            assert os.environ.get("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT") == "0"
+            assert os.environ.get("FLAGS_use_mkldnn") == "0"
+        assert ocr_calls[-1]["enable_mkldnn"] is False
+        assert struct_calls[-1] == {"lang": "vi", "enable_mkldnn": False}
+    finally:
+        _reset_ocr_singletons()
+
+    # On Windows with explicit opt-in PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=1: respects user override
+    ocr_calls.clear()
+    _reset_ocr_singletons()
+    try:
+        with (
+            _clean_mkldnn_env(),
+            patch.dict(os.environ, {"PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT": "1"}),
+            patch.object(ocr_engine.sys, "platform", "win32"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
+            get_paddle_ocr("vie")
+        assert "enable_mkldnn" not in ocr_calls[-1]
+    finally:
+        _reset_ocr_singletons()
+
+    # On Linux with FLAGS_use_mkldnn=0: translates into enable_mkldnn=False for PaddleX
+    ocr_calls.clear()
+    _reset_ocr_singletons()
+    try:
+        with (
+            _clean_mkldnn_env(),
+            patch.dict(os.environ, {"FLAGS_use_mkldnn": "0"}),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
+            get_paddle_ocr("vie")
+            assert os.environ.get("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT") == "0"
+        assert ocr_calls[-1]["enable_mkldnn"] is False
+    finally:
+        _reset_ocr_singletons()
+
+
+def test_pir_mkldnn_runtime_auto_fallback_plain_and_structure() -> None:
+    ocr_init_calls = []
+    struct_init_calls = []
+
+    class FlakyPaddleOCRv3:
+        def __init__(self, **kwargs):
+            ocr_init_calls.append(kwargs)
+            self.mkldnn_off = kwargs.get("enable_mkldnn") is False
+
+        def predict(self, img):
+            if not self.mkldnn_off:
+                raise NotImplementedError(
+                    "(Unimplemented) ConvertPirAttribute2RuntimeAttribute not support "
+                    "[pir::ArrayAttribute<pir::DoubleAttribute>]"
+                )
+            return [
+                {
+                    "rec_texts": ["Xin chào"],
+                    "rec_scores": [0.98],
+                    "rec_boxes": [[10, 10, 100, 30]],
+                }
+            ]
+
+    class FlakyPPStructureV3:
+        def __init__(self, **kwargs):
+            struct_init_calls.append(kwargs)
+            self.mkldnn_off = kwargs.get("enable_mkldnn") is False
+
+        def predict(self, img):
+            if not self.mkldnn_off:
+                raise NotImplementedError(
+                    "(Unimplemented) ConvertPirAttribute2RuntimeAttribute not support"
+                )
+            return [{"markdown": {"markdown_texts": "## OK"}}]
+
+    fake_mod = types.SimpleNamespace(
+        __version__="3.3.0",
+        PaddleOCR=FlakyPaddleOCRv3,
+        PPStructureV3=FlakyPPStructureV3,
+    )
+
+    _reset_ocr_singletons()
+    try:
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
+            blocks = run_plain_ocr_on_array(None, lang="vie")
+            assert [b.text for b in blocks] == ["Xin chào"]
+            assert len(ocr_init_calls) == 2
+            assert "enable_mkldnn" not in ocr_init_calls[0]
+            assert ocr_init_calls[1]["enable_mkldnn"] is False
+
+            # Because _force_disable_mkldnn is now True, PPStructureV3 starts directly with enable_mkldnn=False
+            sblocks = run_structure_on_image(None, lang="vie", page_number=1)
+            assert [b.text for b in sblocks] == ["## OK"]
+            assert struct_init_calls == [{"lang": "vi", "enable_mkldnn": False}]
+    finally:
+        _reset_ocr_singletons()
+
+    # Also test PPStructureV3 hitting PIR/oneDNN error first and auto-retrying
+    struct_init_calls.clear()
+    _reset_ocr_singletons()
+    try:
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_mod}),
+        ):
+            sblocks = run_structure_on_image(None, lang="vie", page_number=1)
+            assert [b.text for b in sblocks] == ["## OK"]
+            assert struct_init_calls == [
+                {"lang": "vi"},
+                {"lang": "vi", "enable_mkldnn": False},
+            ]
+    finally:
+        _reset_ocr_singletons()
+
+
+class _FakeNdArray:
+    """Mimics numpy.ndarray truthiness behavior (raises ValueError for >1 elements)."""
+
+    def __init__(self, data):
+        self._data = data
+        self.size = self._count(data)
+
+    @classmethod
+    def _count(cls, x) -> int:
+        if isinstance(x, list):
+            return sum(cls._count(i) for i in x)
+        return 1
+
+    def __bool__(self) -> bool:
+        if self.size == 0:
+            return False
+        if self.size == 1:
+            return bool(self._data[0])
+        raise ValueError(
+            "The truth value of an array with more than one element is ambiguous. "
+            "Use a.any() or a.all()"
+        )
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __iter__(self):
+        for item in self._data:
+            yield _FakeNdArray(item) if isinstance(item, list) else item
+
+    def tolist(self):
+        return self._data
+
+
+def test_numpy_array_ocr_and_structure_results_do_not_use_truthiness() -> None:
+    # 1. Dict-style PaddleOCR 3.x result with multi-element numpy-like arrays
+    fake_engine_dict = MagicMock()
+    fake_engine_dict.predict.return_value = [
+        {
+            "rec_texts": _FakeNdArray(["World", "Hello"]),
+            "rec_scores": _FakeNdArray([0.95, 0.91]),
+            "rec_boxes": _FakeNdArray([[120, 10, 200, 30], [10, 10, 100, 30]]),
+        }
+    ]
+    with patch("document_converter.ocr_engine.get_paddle_ocr", return_value=fake_engine_dict):
+        blocks = run_plain_ocr_on_array(None, lang="vie")
+    assert [b.text for b in blocks] == ["Hello World"]
+    assert blocks[0].source["bbox"] == [10.0, 10.0, 200.0, 30.0]
+
+    # 2. Attribute-style result where rec_boxes is empty ndarray and dt_polys has polygons
+    fake_res_attr = types.SimpleNamespace(
+        rec_texts=_FakeNdArray(["Line 1", "Line 2"]),
+        rec_scores=_FakeNdArray([0.92, 0.94]),
+        rec_boxes=_FakeNdArray([]),
+        dt_polys=_FakeNdArray(
+            [
+                [[10, 10], [100, 10], [100, 30], [10, 30]],
+                [[10, 90], [100, 90], [100, 110], [10, 110]],
+            ]
+        ),
+    )
+    fake_engine_attr = MagicMock()
+    fake_engine_attr.predict.return_value = [fake_res_attr]
+    with patch("document_converter.ocr_engine.get_paddle_ocr", return_value=fake_engine_attr):
+        ablocks = run_plain_ocr_on_array(None, lang="vie")
+    assert [b.text for b in ablocks] == ["Line 1", "Line 2"]
+    assert ablocks[0].source["bbox"] == [10.0, 10.0, 100.0, 30.0]
+    assert ablocks[1].source["bbox"] == [10.0, 90.0, 100.0, 110.0]
+
+    # 3. Structure result with numpy-like bbox arrays
+    struct_items = [
+        {"type": "text", "bbox": _FakeNdArray([0, 50, 100, 70]), "res": "Second"},
+        {"type": "title", "bbox": _FakeNdArray([0, 10, 100, 30]), "res": "First"},
+    ]
+    sblocks = structure_result_to_blocks(struct_items, page_number=1)
+    assert [b.text for b in sblocks] == ["First", "Second"]
+    assert sblocks[0].source["bbox"] == [0.0, 10.0, 100.0, 30.0]
