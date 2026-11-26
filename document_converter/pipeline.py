@@ -6,10 +6,26 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from .csv_adapter import CSV_SUFFIXES, convert_csv
+from .docx_adapter import DOCX_SUFFIXES, convert_docx
+from .email_adapter import EMAIL_SUFFIXES, convert_email
 from .excel_adapter import convert_excel
+from .html_adapter import HTML_SUFFIXES, convert_html
 from .image_adapter import IMAGE_SUFFIXES, convert_image
 from .markdown import render_document
 from .pdf_adapter import convert_pdf
+from .pptx_adapter import PPTX_SUFFIXES, convert_pptx
+
+ASSET_EXPORT_SUFFIXES = {".pdf"} | DOCX_SUFFIXES | PPTX_SUFFIXES | EMAIL_SUFFIXES
+SUPPORTED_SUFFIXES = (
+    {".pdf", ".xlsx", ".xlsm"}
+    | IMAGE_SUFFIXES
+    | DOCX_SUFFIXES
+    | PPTX_SUFFIXES
+    | EMAIL_SUFFIXES
+    | HTML_SUFFIXES
+    | CSV_SUFFIXES
+)
 
 
 def _metadata(document) -> dict:
@@ -51,12 +67,16 @@ def convert_file(
     det_model: Optional[str] = None,
     rec_model: Optional[str] = None,
 ) -> Path:
-    """Convert one PDF, image or Excel file to Markdown, optionally exporting assets and metadata."""
+    """Convert one supported document (PDF, Office, Email, HTML, CSV, image) to Markdown."""
     source = Path(input_path)
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     suffix = source.suffix.lower()
-    assets = target.with_name(target.stem + "_assets") if export_images and suffix == ".pdf" else None
+    assets = (
+        target.with_name(target.stem + "_assets")
+        if export_images and suffix in ASSET_EXPORT_SUFFIXES
+        else None
+    )
 
     if suffix == ".pdf":
         document = convert_pdf(
@@ -72,10 +92,6 @@ def convert_file(
             det_model=det_model,
             rec_model=rec_model,
         )
-        if assets is not None:
-            for block in document.blocks:
-                if block.kind == "image":
-                    block.text = assets.name + "/" + block.text
     elif suffix in IMAGE_SUFFIXES:
         document = convert_image(
             source,
@@ -87,14 +103,30 @@ def convert_file(
             det_model=det_model,
             rec_model=rec_model,
         )
+    elif suffix in DOCX_SUFFIXES:
+        document = convert_docx(source, output_assets=assets)
+    elif suffix in PPTX_SUFFIXES:
+        document = convert_pptx(source, output_assets=assets)
+    elif suffix in EMAIL_SUFFIXES:
+        document = convert_email(source, output_assets=assets)
+    elif suffix in HTML_SUFFIXES:
+        document = convert_html(source)
+    elif suffix in CSV_SUFFIXES:
+        document = convert_csv(source)
     elif suffix in {".xlsx", ".xlsm"}:
         document = convert_excel(source, recalculate=recalculate)
-    elif suffix == ".xls":
+    elif suffix in {".xls", ".doc", ".ppt"}:
+        modern = {".xls": ".xlsx", ".doc": ".docx", ".ppt": ".pptx"}[suffix]
         raise RuntimeError(
-            "Legacy .xls is not supported; convert it to .xlsx first (e.g. with LibreOffice)."
+            f"Legacy {suffix} is not supported directly; convert it to {modern} first (e.g. with LibreOffice)."
         )
     else:
         raise RuntimeError(f"Unsupported input type: {source.suffix or '(no extension)'}")
+
+    if assets is not None:
+        for block in document.blocks:
+            if block.kind == "image" and not block.text.startswith(("http://", "https://", assets.name + "/")):
+                block.text = assets.name + "/" + block.text
 
     target.write_text(render_document(document, mode=mode), encoding="utf-8")
     if export_meta:

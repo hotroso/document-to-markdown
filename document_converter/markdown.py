@@ -85,17 +85,29 @@ def render_document(document: Document, mode: str = "balanced") -> str:
                 if text:
                     lines.extend([escape_inline(text), ""])
         elif block.kind == "list":
-            for item in block.text.splitlines():
-                item = item.strip()
-                if item:
-                    item = re.sub(r"^[•●▪◦·]\s*", "- ", item)
+            for raw_item in block.text.splitlines():
+                stripped = raw_item.strip()
+                if stripped:
+                    leading = len(raw_item) - len(raw_item.lstrip(" "))
+                    indent = "  " * min(leading // 2, 4)
+                    item = re.sub(r"^[•●▪◦·]\s*", "- ", stripped)
                     item = re.sub(r"^(\d+)[.)]\s+", r"\1. ", item)
                     if not item.startswith(("- ", "* ")) and not re.match(r"^\d+\. ", item):
                         item = "- " + item
                     marker_match = re.match(r"^([-*] |\d+\. )", item)
                     marker = marker_match.group(1) if marker_match else ""
                     content = item[len(marker):] if marker else item
-                    lines.append(marker + escape_inline(content))
+                    lines.append(indent + marker + escape_inline(content))
+            lines.append("")
+        elif block.kind == "code":
+            lang = str(block.metadata.get("language", "") or "").strip()
+            code_text = block.text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n")
+            fence = "````" if "```" in code_text else "```"
+            lines.extend([f"{fence}{lang}", code_text, fence, ""])
+        elif block.kind == "blockquote":
+            for qline in block.text.replace("\r", "").splitlines():
+                qline = qline.strip()
+                lines.append("> " + escape_inline(qline) if qline else ">")
             lines.append("")
         elif block.kind == "table":
             lines.extend(render_table(block.rows))

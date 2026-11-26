@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sys
 import types
+import zipfile
+from email.message import EmailMessage
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -701,3 +703,300 @@ def test_paddle_model_selection_profiles_versions_and_cli(tmp_path: Path) -> Non
         ]
     finally:
         _reset_ocr_singletons()
+
+
+def _make_sample_docx(dest: Path) -> None:
+    core_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+                       xmlns:dc="http://purl.org/dc/elements/1.1/">
+      <dc:title>Quarterly Plan</dc:title>
+    </cp:coreProperties>"""
+
+    styles_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:style w:type="paragraph" w:styleId="Heading1">
+        <w:name w:val="heading 1"/>
+        <w:pPr><w:outlineLvl w:val="0"/></w:pPr>
+      </w:style>
+    </w:styles>"""
+
+    numbering_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:abstractNum w:abstractNumId="1">
+        <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl>
+        <w:lvl w:ilvl="1"><w:numFmt w:val="bullet"/></w:lvl>
+      </w:abstractNum>
+      <w:num w:numId="1"><w:abstractNumId w:val="1"/></w:num>
+    </w:numbering>"""
+
+    rels_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com" TargetMode="External"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/img1.png"/>
+    </Relationships>"""
+
+    document_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <w:body>
+        <w:p>
+          <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+          <w:r><w:t>Overview</w:t></w:r>
+        </w:p>
+        <w:p>
+          <w:r><w:t>Visit </w:t></w:r>
+          <w:hyperlink r:id="rId1"><w:r><w:t>our site</w:t></w:r></w:hyperlink>
+          <w:del><w:r><w:delText>OLD</w:delText></w:r></w:del>
+        </w:p>
+        <w:p>
+          <w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr>
+          <w:r><w:t>First step</w:t></w:r>
+        </w:p>
+        <w:p>
+          <w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr>
+          <w:r><w:t>Sub detail</w:t></w:r>
+        </w:p>
+        <w:tbl>
+          <w:tr>
+            <w:tc><w:p><w:r><w:t>Item</w:t></w:r></w:p></w:tc>
+            <w:tc><w:p><w:r><w:t>Price</w:t></w:r></w:p></w:tc>
+          </w:tr>
+          <w:tr>
+            <w:tc><w:p><w:r><w:t>Widget</w:t></w:r></w:p></w:tc>
+            <w:tc><w:p><w:r><w:t>120</w:t></w:r></w:p></w:tc>
+          </w:tr>
+        </w:tbl>
+        <w:p>
+          <w:r><w:drawing><a:blip r:embed="rId2"/></w:drawing></w:r>
+        </w:p>
+      </w:body>
+    </w:document>"""
+
+    footnotes_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:footnote w:type="separator" w:id="-1"><w:p><w:r><w:t>---</w:t></w:r></w:p></w:footnote>
+      <w:footnote w:id="1"><w:p><w:r><w:t>Verified in Q1.</w:t></w:r></w:p></w:footnote>
+    </w:footnotes>"""
+
+    with zipfile.ZipFile(dest, "w") as zf:
+        zf.writestr("docProps/core.xml", core_xml)
+        zf.writestr("word/styles.xml", styles_xml)
+        zf.writestr("word/numbering.xml", numbering_xml)
+        zf.writestr("word/_rels/document.xml.rels", rels_xml)
+        zf.writestr("word/document.xml", document_xml)
+        zf.writestr("word/footnotes.xml", footnotes_xml)
+        zf.writestr("word/media/img1.png", b"\x89PNG\r\n\x1a\n")
+
+
+def _make_sample_pptx(dest: Path) -> None:
+    pres_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                    xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <p:sldIdLst>
+        <p:sldId id="256" r:id="rId2"/>
+        <p:sldId id="257" r:id="rId1"/>
+      </p:sldIdLst>
+    </p:presentation>"""
+
+    pres_rels = """<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+    </Relationships>"""
+
+    slide1_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+           xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <p:cSld><p:spTree>
+        <p:sp>
+          <p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="10"/></a:xfrm></p:spPr>
+          <p:txBody><a:p><a:r><a:t>Intro Deck</a:t></a:r></a:p></p:txBody>
+        </p:sp>
+        <p:sp>
+          <p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:spPr><a:xfrm><a:off x="0" y="100"/></a:xfrm></p:spPr>
+          <p:txBody>
+            <a:p><a:r><a:t>Fast local OCR</a:t></a:r></a:p>
+            <a:p><a:pPr lvl="1"/><a:r><a:t>Supports Vietnamese</a:t></a:r></a:p>
+          </p:txBody>
+        </p:sp>
+      </p:spTree></p:cSld>
+    </p:sld>"""
+
+    slide1_rels = """<?xml version="1.0" encoding="UTF-8"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>
+    </Relationships>"""
+
+    notes1_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+             xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <p:cSld><p:spTree>
+        <p:sp>
+          <p:nvSpPr><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p><a:r><a:t>Remember to mention offline privacy.</a:t></a:r></a:p></p:txBody>
+        </p:sp>
+      </p:spTree></p:cSld>
+    </p:notes>"""
+
+    slide2_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+           xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+      <p:cSld><p:spTree>
+        <p:sp>
+          <p:nvSpPr><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+          <p:txBody><a:p><a:r><a:t>Metrics</a:t></a:r></a:p></p:txBody>
+        </p:sp>
+        <p:graphicFrame>
+          <a:graphic><a:graphicData><a:tbl>
+            <a:tr>
+              <a:tc><a:txBody><a:p><a:r><a:t>Metric</a:t></a:r></a:p></a:txBody></a:tc>
+              <a:tc><a:txBody><a:p><a:r><a:t>Score</a:t></a:r></a:p></a:txBody></a:tc>
+            </a:tr>
+            <a:tr>
+              <a:tc><a:txBody><a:p><a:r><a:t>Accuracy</a:t></a:r></a:p></a:txBody></a:tc>
+              <a:tc><a:txBody><a:p><a:r><a:t>99%</a:t></a:r></a:p></a:txBody></a:tc>
+            </a:tr>
+          </a:tbl></a:graphicData></a:graphic>
+        </p:graphicFrame>
+      </p:spTree></p:cSld>
+    </p:sld>"""
+
+    with zipfile.ZipFile(dest, "w") as zf:
+        zf.writestr("ppt/presentation.xml", pres_xml)
+        zf.writestr("ppt/_rels/presentation.xml.rels", pres_rels)
+        zf.writestr("ppt/slides/slide1.xml", slide1_xml)
+        zf.writestr("ppt/slides/_rels/slide1.xml.rels", slide1_rels)
+        zf.writestr("ppt/notesSlides/notesSlide1.xml", notes1_xml)
+        zf.writestr("ppt/slides/slide2.xml", slide2_xml)
+
+
+def test_docx_and_pptx_adapters_end_to_end(tmp_path: Path) -> None:
+    docx_file = tmp_path / "plan.docx"
+    _make_sample_docx(docx_file)
+    out_docx = tmp_path / "plan.md"
+    assert main([str(docx_file), "-o", str(out_docx), "--assets"]) == 0
+    md = out_docx.read_text(encoding="utf-8")
+    assert "# Quarterly Plan" in md
+    assert "# Overview" in md
+    assert "our site (https://example.com)" in md
+    assert "OLD" not in md
+    assert "1. First step" in md
+    assert "  - Sub detail" in md
+    assert "| Item | Price |" in md
+    assert "| Widget | 120 |" in md
+    assert "## Footnotes" in md
+    assert "Verified in Q1." in md
+    assert (tmp_path / "plan_assets" / "docx-image-01.png").exists()
+    assert "plan_assets/docx-image-01.png" in md
+
+    pptx_file = tmp_path / "deck.pptx"
+    _make_sample_pptx(pptx_file)
+    out_pptx = tmp_path / "deck.md"
+    assert main([str(pptx_file), "-o", str(out_pptx)]) == 0
+    pmd = out_pptx.read_text(encoding="utf-8")
+    assert "## Slide 1: Intro Deck" in pmd
+    assert "- Fast local OCR" in pmd
+    assert "  - Supports Vietnamese" in pmd
+    assert "### Speaker Notes" in pmd
+    assert "Remember to mention offline privacy." in pmd
+    assert "## Slide 2: Metrics" in pmd
+    assert "| Accuracy | 99% |" in pmd
+    assert pmd.index("Slide 1") < pmd.index("Slide 2")
+
+
+def test_email_html_and_csv_adapters_end_to_end(tmp_path: Path) -> None:
+    # 1. Multipart .eml with attachment
+    eml_file = tmp_path / "memo.eml"
+    msg = EmailMessage()
+    msg["Subject"] = "Q4 Sync"
+    msg["From"] = "alice@example.com"
+    msg["To"] = "bob@example.com"
+    msg["Date"] = "Thu, 26 Nov 2026 10:00:00 +0700"
+    msg.set_content("Hello Bob,\n\n> Previous note\n\nSee attached.")
+    msg.add_attachment(b"PNGDATA", maintype="image", subtype="png", filename="chart.png")
+    eml_file.write_bytes(msg.as_bytes())
+
+    out_eml = tmp_path / "memo.md"
+    assert main([str(eml_file), "-o", str(out_eml), "--assets"]) == 0
+    emd = out_eml.read_text(encoding="utf-8")
+    assert "# Q4 Sync" in emd
+    assert "alice@example.com" in emd
+    assert "> Previous note" in emd
+    assert "## Attachments" in emd
+    assert "chart.png" in emd
+    assert (tmp_path / "memo_assets" / "chart.png").exists()
+
+    # 2. Outlook .msg via mocked extract_msg
+    msg_file = tmp_path / "outlook.msg"
+    msg_file.write_bytes(b"FAKE_MSG")
+
+    class FakeMsg:
+        subject = "Outlook Update"
+        sender = "cto@example.com"
+        to = "team@example.com"
+        cc = ""
+        date = "2026-11-26"
+        body = "Release is live."
+        htmlBody = b"<table><tr><th>Env</th><th>Status</th></tr><tr><td>Prod</td><td>OK</td></tr></table>"
+        attachments = []
+
+        def __init__(self, path):
+            self.path = path
+
+        def close(self):
+            pass
+
+    fake_extract_msg = types.SimpleNamespace(Message=FakeMsg)
+    out_msg = tmp_path / "outlook.md"
+    with patch.dict(sys.modules, {"extract_msg": fake_extract_msg}):
+        assert main([str(msg_file), "-o", str(out_msg)]) == 0
+    mmd = out_msg.read_text(encoding="utf-8")
+    assert "# Outlook Update" in mmd
+    assert "| Prod | OK |" in mmd
+
+    # 3. HTML with script stripped, code block, blockquote, colspan table
+    html_file = tmp_path / "page.html"
+    html_file.write_text(
+        """<!doctype html>
+        <html><head><title>Web Doc</title><style>body{color:red}</style></head>
+        <body>
+          <script>alert('ignore')</script>
+          <h2>Section A</h2>
+          <p>Intro paragraph.</p>
+          <blockquote>Quoted insight</blockquote>
+          <pre><code class="language-python">x = 1 + 2</code></pre>
+          <table>
+            <tr><th>Name</th><th colspan="2">Scores</th></tr>
+            <tr><td>Alice</td><td>10</td><td>20</td></tr>
+          </table>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    out_html = tmp_path / "page.md"
+    assert main([str(html_file), "-o", str(out_html)]) == 0
+    hmd = out_html.read_text(encoding="utf-8")
+    assert "# Web Doc" in hmd
+    assert "## Section A" in hmd
+    assert "alert" not in hmd
+    assert "> Quoted insight" in hmd
+    assert "```python\nx = 1 + 2\n```" in hmd
+    assert "| Alice | 10 | 20 |" in hmd
+
+    # 4. CSV (semicolon-delimited) and TSV
+    csv_file = tmp_path / "data.csv"
+    csv_file.write_text("Name;Amount\nAlpha;100\nBeta;250\n", encoding="utf-8-sig")
+    out_csv = tmp_path / "data.md"
+    assert main([str(csv_file), "-o", str(out_csv)]) == 0
+    cmd = out_csv.read_text(encoding="utf-8")
+    assert "| Name | Amount |" in cmd
+    assert "| :--- | ---: |" in cmd
+    assert "| Alpha | 100 |" in cmd
+
+    tsv_file = tmp_path / "data.tsv"
+    tsv_file.write_text("Key\tValue\nfoo\tbar\n", encoding="utf-8")
+    out_tsv = tmp_path / "data_tsv.md"
+    assert main([str(tsv_file), "-o", str(out_tsv)]) == 0
+    assert "| foo | bar |" in out_tsv.read_text(encoding="utf-8")

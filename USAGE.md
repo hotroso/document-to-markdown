@@ -31,7 +31,7 @@ document-to-markdown report.pdf -o out/
 
 ### Batch Directory Conversion
 
-Pass one or more directories or multiple files. Directories are scanned recursively for supported extensions (`.pdf`, `.xlsx`, `.xlsm`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff`):
+Pass one or more directories or multiple files. Directories are scanned recursively for supported extensions (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.xlsm`, `.eml`, `.msg`, `.html`, `.htm`, `.csv`, `.tsv`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff`):
 
 ```bash
 document-to-markdown data/input -o data/output
@@ -162,7 +162,37 @@ document-to-markdown scan.pdf --det-model PP-OCRv5_mobile_det --rec-model latin_
 
 ---
 
-## 7. Excel Workbooks
+## 7. Office (Word, PowerPoint, Excel), Email, HTML & CSV
+
+### Word (`.docx`) & PowerPoint (`.pptx`)
+
+Works out of the box with zero extra dependencies:
+
+```bash
+# Convert a Word document (headings, lists, tables, hyperlinks, footnotes)
+document-to-markdown proposal.docx
+
+# Convert a PowerPoint deck (slides, tables, speaker notes) and export slide images
+document-to-markdown pitch.pptx --assets
+```
+
+### Email (`.eml` & Outlook `.msg`)
+
+`.eml` works out of the box; Outlook `.msg` requires the optional `[outlook]` extra (`pip install "document-to-markdown[outlook] @ git+https://github.com/hotroso/document-to-markdown.git"`):
+
+```bash
+document-to-markdown thread.eml --assets
+document-to-markdown message.msg -o message.md
+```
+
+### HTML (`.html`, `.htm`) & CSV / TSV (`.csv`, `.tsv`)
+
+```bash
+document-to-markdown article.html -o article.md
+document-to-markdown metrics.csv -o metrics.md
+```
+
+### Excel Workbooks (`.xlsx`, `.xlsm`)
 
 Supported formats: `.xlsx`, `.xlsm` (legacy `.xls` must be converted to `.xlsx` first).
 

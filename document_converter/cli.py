@@ -10,10 +10,9 @@ from pathlib import Path
 from typing import Iterable, List
 
 from . import __version__
-from .image_adapter import IMAGE_SUFFIXES
-from .pipeline import convert_file
+from .pipeline import SUPPORTED_SUFFIXES, convert_file
 
-SUPPORTED = {".pdf", ".xlsx", ".xlsm"} | IMAGE_SUFFIXES
+SUPPORTED = SUPPORTED_SUFFIXES
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -39,7 +38,7 @@ def _inputs(values: Iterable[str]) -> List[Path]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Convert free-form PDF, images and Excel files to AI-friendly Markdown."
+        description="Convert PDF, Office (DOCX, PPTX, Excel), Email (EML/MSG), HTML, CSV, and images to AI-friendly Markdown."
     )
     parser.add_argument("inputs", nargs="+", help="Files or directories to convert")
     parser.add_argument("-o", "--output", help="Output .md file or output directory")
@@ -92,7 +91,7 @@ def _parser() -> argparse.ArgumentParser:
         dest="export_images",
         action="store_true",
         default=False,
-        help="Export images extracted from PDF into an _assets directory",
+        help="Export embedded images / attachments (PDF, DOCX, PPTX, Email) into an _assets directory",
     )
     parser.add_argument(
         "--no-images",
