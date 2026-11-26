@@ -155,6 +155,10 @@ When a workbook contains formulas, the converter resolves cell values in order:
 
 ## Changelog
 
+### 0.3.3
+- Fix `ValueError: The truth value of an array with more than one element is ambiguous` when reading NumPy array outputs (`rec_texts`, `rec_scores`, `rec_boxes`, `dt_polys`, `bbox`) from PaddleOCR 3.x / PP-Structure and normalize NumPy bounding boxes in `_bbox_rect`
+- Add cross-platform PaddlePaddle 3.x PIR/oneDNN (`ConvertPirAttribute2RuntimeAttribute`) mitigation: proactively disable MKLDNN by default on Windows (`PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT=0` + `enable_mkldnn=False`, overridable via env), honor `FLAGS_use_mkldnn=0` on all platforms, and auto-retry with `enable_mkldnn=False` at runtime if the error occurs
+
 ### 0.3.2
 - Fix PaddleOCR 3.x+ initialization by omitting the removed `show_log=False` constructor argument and silencing verbose logs via Python `logging`
 - Preserve PaddleOCR 2.x constructor fallback (`use_angle_cls`, `show_log=False`, `use_gpu=False`) and handle both `TypeError` and `ValueError` fallbacks across `PaddleOCR`, `PPStructureV3`, and classic `PPStructure`
