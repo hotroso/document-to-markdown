@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 import logging
 import re
@@ -125,26 +126,92 @@ def detect_ocr_engine(requested: str) -> str:
         return "off"
 
 
+def _parse_major_version(version: Any) -> Optional[int]:
+    if not isinstance(version, str):
+        return None
+    match = re.match(r"^\s*(\d+)", version)
+    return int(match.group(1)) if match else None
+
+
+def _is_paddleocr_v3(paddleocr_module: Any, paddle_cls: Any) -> bool:
+    """Return True for PaddleOCR 3.x+ (modern API that removed show_log)."""
+    major = _parse_major_version(getattr(paddleocr_module, "__version__", None))
+    if major is not None:
+        return major >= 3
+    if hasattr(paddle_cls, "predict"):
+        return True
+    try:
+        params = inspect.signature(paddle_cls).parameters
+        if "use_doc_orientation_classify" in params:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
+def _silence_paddle_logger(paddleocr_module: Any) -> None:
+    """Suppress verbose PaddleOCR 3.x logs via Python logging unless debug mode is active."""
+    if logger.isEnabledFor(logging.DEBUG):
+        return
+    paddle_logger = getattr(paddleocr_module, "logger", None)
+    if isinstance(paddle_logger, logging.Logger) and paddle_logger.level in (
+        logging.NOTSET,
+        logging.DEBUG,
+        logging.INFO,
+    ):
+        paddle_logger.setLevel(logging.WARNING)
+    for name in ("ppocr", "paddleocr"):
+        mod_logger = logging.getLogger(name)
+        if mod_logger.level in (logging.NOTSET, logging.DEBUG, logging.INFO):
+            mod_logger.setLevel(logging.WARNING)
+
+
+def _init_with_fallback(factory: Any, candidates: List[Dict[str, Any]]):
+    last_exc: Optional[Exception] = None
+    for kwargs in candidates:
+        try:
+            return factory(**kwargs)
+        except (TypeError, ValueError) as exc:
+            last_exc = exc
+            logger.debug(
+                "Constructor %s(%s) failed: %s",
+                getattr(factory, "__name__", factory),
+                kwargs,
+                exc,
+            )
+    assert last_exc is not None
+    raise last_exc
+
+
 def get_paddle_ocr(lang: str = "vie"):
     global _paddle_ocr, _paddle_ocr_lang
     mapped = map_lang_for_paddle(lang)
     if _paddle_ocr is not None and _paddle_ocr_lang == mapped:
         return _paddle_ocr
+    import paddleocr
     from paddleocr import PaddleOCR
 
-    try:
-        _paddle_ocr = PaddleOCR(
-            lang=mapped,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-            use_textline_orientation=False,
-            show_log=False,
-        )
-    except TypeError:
-        try:
-            _paddle_ocr = PaddleOCR(use_angle_cls=True, lang=mapped, show_log=False, use_gpu=False)
-        except TypeError:
-            _paddle_ocr = PaddleOCR(use_angle_cls=True, lang=mapped)
+    if _is_paddleocr_v3(paddleocr, PaddleOCR):
+        _silence_paddle_logger(paddleocr)
+        candidates = [
+            {
+                "lang": mapped,
+                "use_doc_orientation_classify": False,
+                "use_doc_unwarping": False,
+                "use_textline_orientation": False,
+            },
+            {"lang": mapped},
+        ]
+    else:
+        # PaddleOCR 2.x fallback (supports show_log=False and use_angle_cls)
+        candidates = [
+            {"use_angle_cls": True, "lang": mapped, "show_log": False, "use_gpu": False},
+            {"use_angle_cls": True, "lang": mapped, "show_log": False},
+            {"use_angle_cls": True, "lang": mapped},
+            {"lang": mapped},
+        ]
+
+    _paddle_ocr = _init_with_fallback(PaddleOCR, candidates)
     _paddle_ocr_lang = mapped
     logger.info("Loaded PaddleOCR (lang=%s)", mapped)
     return _paddle_ocr
@@ -157,14 +224,13 @@ def get_structure_engine(lang: str = "vie"):
     if _structure_engine is not None and _structure_lang == mapped:
         return _structure_engine
 
-    # Try modern pipeline first
+    # Try modern pipeline first (PaddleOCR 3.x; no show_log parameter)
     try:
+        import paddleocr
         from paddleocr import PPStructureV3
 
-        try:
-            _structure_engine = PPStructureV3(lang=mapped)
-        except TypeError:
-            _structure_engine = PPStructureV3()
+        _silence_paddle_logger(paddleocr)
+        _structure_engine = _init_with_fallback(PPStructureV3, [{"lang": mapped}, {}])
         _structure_lang = mapped
         logger.info("Loaded PPStructureV3 (lang=%s)", mapped)
         return _structure_engine
@@ -172,15 +238,20 @@ def get_structure_engine(lang: str = "vie"):
         logger.debug("PPStructureV3 unavailable: %s", exc)
 
     try:
+        import paddleocr
         from paddleocr import PPStructure
 
-        try:
-            _structure_engine = PPStructure(show_log=False, lang=mapped)
-        except TypeError:
-            try:
-                _structure_engine = PPStructure(show_log=False)
-            except TypeError:
-                _structure_engine = PPStructure()
+        if _is_paddleocr_v3(paddleocr, PPStructure):
+            _silence_paddle_logger(paddleocr)
+            structure_candidates = [{"lang": mapped}, {}]
+        else:
+            structure_candidates = [
+                {"show_log": False, "lang": mapped},
+                {"lang": mapped},
+                {"show_log": False},
+                {},
+            ]
+        _structure_engine = _init_with_fallback(PPStructure, structure_candidates)
         _structure_lang = mapped
         logger.info("Loaded classic PPStructure")
         return _structure_engine

@@ -10,7 +10,10 @@ from unittest.mock import MagicMock, patch
 from document_converter.cli import _parser, main
 from document_converter.markdown import render_document
 from document_converter.models import Block, Document
+from document_converter import ocr_engine
 from document_converter.ocr_engine import (
+    get_paddle_ocr,
+    get_structure_engine,
     map_lang_for_paddle,
     map_lang_for_tesseract,
     ocr_pil_image_tesseract,
@@ -145,3 +148,147 @@ def test_page_needs_ocr_and_tesseract_lang() -> None:
     assert tblocks[0].text == "Xin chào"
     assert tblocks[0].source == {"page": 2}
     assert fake_tess.image_to_data.call_args.kwargs["lang"] == "eng+vie"
+
+
+def _reset_ocr_singletons() -> None:
+    ocr_engine._paddle_ocr = None
+    ocr_engine._paddle_ocr_lang = None
+    ocr_engine._structure_engine = None
+    ocr_engine._structure_lang = None
+
+
+def test_get_paddle_ocr_v3_omits_show_log() -> None:
+    calls = []
+
+    class FakePaddleOCRv3:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if "show_log" in kwargs:
+                raise ValueError("Unknown argument: show_log")
+
+        def predict(self, img):
+            return []
+
+    fake_mod = types.SimpleNamespace(__version__="3.0.1", PaddleOCR=FakePaddleOCRv3)
+    _reset_ocr_singletons()
+    try:
+        with patch.dict(sys.modules, {"paddleocr": fake_mod}):
+            engine = get_paddle_ocr("vie")
+        assert isinstance(engine, FakePaddleOCRv3)
+        assert len(calls) == 1
+        assert "show_log" not in calls[0]
+        assert calls[0] == {
+            "lang": "vi",
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        }
+    finally:
+        _reset_ocr_singletons()
+
+
+def test_get_paddle_ocr_v3_fallback_on_value_error_and_without_version() -> None:
+    calls = []
+
+    class FakeStrictPaddleOCRv3:
+        def __init__(self, lang="en", **kwargs):
+            calls.append({"lang": lang, **kwargs})
+            if kwargs:
+                raise ValueError(f"Unknown argument: {next(iter(kwargs))}")
+
+        def predict(self, img):
+            return []
+
+    # No __version__ attribute -> detected via predict method
+    fake_mod = types.SimpleNamespace(PaddleOCR=FakeStrictPaddleOCRv3)
+    _reset_ocr_singletons()
+    try:
+        with patch.dict(sys.modules, {"paddleocr": fake_mod}):
+            engine = get_paddle_ocr("eng")
+        assert isinstance(engine, FakeStrictPaddleOCRv3)
+        assert len(calls) == 2
+        assert all("show_log" not in c for c in calls)
+        assert calls[-1] == {"lang": "en"}
+    finally:
+        _reset_ocr_singletons()
+
+
+def test_get_paddle_ocr_v2_keeps_show_log_fallback() -> None:
+    calls = []
+
+    class FakePaddleOCRv2:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+        def ocr(self, img, cls=True):
+            return []
+
+    fake_mod = types.SimpleNamespace(__version__="2.9.1", PaddleOCR=FakePaddleOCRv2)
+    _reset_ocr_singletons()
+    try:
+        with patch.dict(sys.modules, {"paddleocr": fake_mod}):
+            engine = get_paddle_ocr("vie")
+        assert isinstance(engine, FakePaddleOCRv2)
+        assert calls == [
+            {"use_angle_cls": True, "lang": "vi", "show_log": False, "use_gpu": False}
+        ]
+    finally:
+        _reset_ocr_singletons()
+
+    # Legacy 2.x variant that rejects use_gpu or show_log with ValueError/TypeError
+    calls.clear()
+
+    class FakePaddleOCRv2NoShowLog:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            if "show_log" in kwargs:
+                raise ValueError("Unknown argument: show_log")
+
+        def ocr(self, img, cls=True):
+            return []
+
+    fake_mod2 = types.SimpleNamespace(__version__="2.8.1", PaddleOCR=FakePaddleOCRv2NoShowLog)
+    _reset_ocr_singletons()
+    try:
+        with patch.dict(sys.modules, {"paddleocr": fake_mod2}):
+            engine = get_paddle_ocr("eng")
+        assert isinstance(engine, FakePaddleOCRv2NoShowLog)
+        assert calls[-1] == {"use_angle_cls": True, "lang": "en"}
+    finally:
+        _reset_ocr_singletons()
+
+
+def test_get_structure_engine_v3_and_v2_fallbacks() -> None:
+    v3_calls = []
+
+    class FakePPStructureV3:
+        def __init__(self, **kwargs):
+            v3_calls.append(kwargs)
+            if "lang" in kwargs:
+                raise ValueError("Unknown argument: lang")
+
+    fake_v3 = types.SimpleNamespace(__version__="3.0.0", PPStructureV3=FakePPStructureV3)
+    _reset_ocr_singletons()
+    try:
+        with patch.dict(sys.modules, {"paddleocr": fake_v3}):
+            engine = get_structure_engine("vie")
+        assert isinstance(engine, FakePPStructureV3)
+        assert v3_calls == [{"lang": "vi"}, {}]
+    finally:
+        _reset_ocr_singletons()
+
+    v2_calls = []
+
+    class FakePPStructureV2:
+        def __init__(self, **kwargs):
+            v2_calls.append(kwargs)
+
+    fake_v2 = types.SimpleNamespace(__version__="2.7.3", PPStructure=FakePPStructureV2)
+    _reset_ocr_singletons()
+    try:
+        with patch.dict(sys.modules, {"paddleocr": fake_v2}):
+            engine = get_structure_engine("vie")
+        assert isinstance(engine, FakePPStructureV2)
+        assert v2_calls == [{"show_log": False, "lang": "vi"}]
+    finally:
+        _reset_ocr_singletons()
