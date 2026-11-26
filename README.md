@@ -35,20 +35,6 @@ Designed for personal and enterprise AI, LLM, and RAG workflows where document l
 | **Email** | `.eml`, `.msg` | Headers table (`From`, `To`, `Cc`, `Date`), plain text / HTML body conversion, quoted replies, attachment listing & optional `--assets` export (`.msg` via `[outlook]` / BSD `olefile`). |
 | **Web & Tabular** | `.html`, `.htm`, `.csv`, `.tsv` | Clean semantic HTML extraction (headings, lists, code fences, blockquotes, colspan/rowspan tables; strips scripts/styles) and auto-delimiter CSV/TSV tables. |
 
-## Why `document-to-markdown`?
-
-| Capability | `document-to-markdown` | `markitdown` | `pymupdf4llm` | `docling` |
-|------------|:----------------------:|:------------:|:-------------:|:---------:|
-| Supported formats | PDF, DOCX, PPTX, XLSX, EML/MSG, HTML, CSV/TSV, Images | Broadest (PDF, Office, MSG, HTML, EPUB, audio, ZIP…) | PDF, XPS, EPUB, Office (via PyMuPDF) | PDF, DOCX, PPTX, XLSX, HTML, Images |
-| 100% local & offline | Yes | Yes (LLM needed for image captions) | Yes | Yes |
-| Hybrid native PDF + automatic scan OCR | Yes (`pdfplumber` + `pypdfium2` + PaddleOCR) | Text-only PDF (`pdfminer`) | Native PDF focus | Yes |
-| Layout & table OCR | PP-StructureV3 + Tesseract fallback | No built-in OCR | No | DocLayNet + OCR |
-| Vietnamese + English OCR out of the box | Yes (`--lang vie`) | External LLM required | Native text only | Depends on OCR backend |
-| Configurable CPU/GPU OCR speed (`mobile` / `server`) | Yes (`--ocr-profile`) | No | N/A | Configurable |
-| Multi-table Excel splitting + 3-tier formula evaluation | Yes | Basic sheet dump | No | Basic |
-| Prebuilt standalone executables (Win / Linux / macOS) | Yes | No | No | No |
-| Dependency license stack | 100% permissive (MIT / Apache-2.0 / BSD) | Permissive | AGPL-3.0 (`PyMuPDF`) | MIT |
-
 ## Installation
 
 Requires **Python >= 3.10**.
