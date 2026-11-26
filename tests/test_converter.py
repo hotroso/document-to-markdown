@@ -154,10 +154,10 @@ def test_page_needs_ocr_and_tesseract_lang() -> None:
 
 def _reset_ocr_singletons() -> None:
     ocr_engine._paddle_ocr = None
-    ocr_engine._paddle_ocr_lang = None
+    ocr_engine._paddle_ocr_key = None
     ocr_engine._paddle_ocr_mkldnn_disabled = False
     ocr_engine._structure_engine = None
-    ocr_engine._structure_lang = None
+    ocr_engine._structure_key = None
     ocr_engine._structure_mkldnn_disabled = False
     ocr_engine._force_disable_mkldnn = False
 
@@ -562,3 +562,142 @@ def test_numpy_array_ocr_and_structure_results_do_not_use_truthiness() -> None:
     sblocks = structure_result_to_blocks(struct_items, page_number=1)
     assert [b.text for b in sblocks] == ["First", "Second"]
     assert sblocks[0].source["bbox"] == [0.0, 10.0, 100.0, 30.0]
+
+
+def test_paddle_model_selection_profiles_versions_and_cli(tmp_path: Path) -> None:
+    # CLI defaults keep library default behavior untouched
+    default_args = _parser().parse_args(["doc.pdf"])
+    assert default_args.ocr_profile == "auto"
+    assert default_args.ocr_version is None
+    assert default_args.det_model is None
+    assert default_args.rec_model is None
+
+    # CLI passes model selection flags through convert_file -> convert_pdf
+    src = tmp_path / "scan.pdf"
+    src.write_bytes(b"%PDF-1.4")
+    captured = {}
+
+    def fake_pdf(path, output_assets=None, **kw):
+        captured.update(kw)
+        doc = Document(str(path), "pdf", path.stem)
+        doc.add(Block("paragraph", "OK"))
+        return doc
+
+    with patch("document_converter.pipeline.convert_pdf", side_effect=fake_pdf):
+        out = tmp_path / "scan.md"
+        rc = main(
+            [
+                str(src),
+                "-o",
+                str(out),
+                "--ocr-profile",
+                "mobile",
+                "--ocr-version",
+                "PP-OCRv5",
+                "--det-model",
+                "PP-OCRv5_mobile_det",
+                "--rec-model",
+                "latin_PP-OCRv5_mobile_rec",
+            ]
+        )
+    assert rc == 0
+    assert captured["ocr_profile"] == "mobile"
+    assert captured["ocr_version"] == "PP-OCRv5"
+    assert captured["det_model"] == "PP-OCRv5_mobile_det"
+    assert captured["rec_model"] == "latin_PP-OCRv5_mobile_rec"
+
+    # PaddleOCR 3.x: mobile profile picks PP-OCRv5_mobile_det and preserves script rec for Vietnamese
+    v3_calls = []
+
+    class FakePaddleOCRv3:
+        def __init__(self, **kwargs):
+            v3_calls.append(kwargs)
+
+        def predict(self, img):
+            return []
+
+    class FakePPStructureV3NoVersion:
+        def __init__(self, **kwargs):
+            v3_calls.append({"_cls": "PPStructureV3", **kwargs})
+            if "ocr_version" in kwargs:
+                raise ValueError("Unknown argument: ocr_version")
+
+        def predict(self, img):
+            return []
+
+    fake_v3 = types.SimpleNamespace(
+        __version__="3.1.0",
+        PaddleOCR=FakePaddleOCRv3,
+        PPStructureV3=FakePPStructureV3NoVersion,
+    )
+    _reset_ocr_singletons()
+    try:
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_v3}),
+        ):
+            e1 = get_paddle_ocr("vie", ocr_profile="mobile")
+            assert v3_calls[-1]["text_detection_model_name"] == "PP-OCRv5_mobile_det"
+            assert "text_recognition_model_name" not in v3_calls[-1]
+
+            # Switching to server profile bypasses cache and uses server det
+            e2 = get_paddle_ocr("vie", ocr_profile="server")
+            assert e2 is not e1
+            assert v3_calls[-1]["text_detection_model_name"] == "PP-OCRv5_server_det"
+
+            # Chinese + mobile sets both mobile det & rec
+            get_paddle_ocr("chi_sim", ocr_profile="mobile", ocr_version="PP-OCRv5")
+            assert v3_calls[-1]["ocr_version"] == "PP-OCRv5"
+            assert v3_calls[-1]["text_detection_model_name"] == "PP-OCRv5_mobile_det"
+            assert v3_calls[-1]["text_recognition_model_name"] == "PP-OCRv5_mobile_rec"
+
+            # Explicit det/rec override
+            get_paddle_ocr(
+                "vie",
+                det_model="PP-OCRv4_mobile_det",
+                rec_model="latin_PP-OCRv5_mobile_rec",
+            )
+            assert v3_calls[-1]["text_detection_model_name"] == "PP-OCRv4_mobile_det"
+            assert v3_calls[-1]["text_recognition_model_name"] == "latin_PP-OCRv5_mobile_rec"
+
+            # PPStructureV3 rejects ocr_version -> falls back keeping text_detection_model_name
+            get_structure_engine("vie", ocr_profile="mobile", ocr_version="PP-OCRv5")
+            assert v3_calls[-1] == {
+                "_cls": "PPStructureV3",
+                "lang": "vi",
+                "text_detection_model_name": "PP-OCRv5_mobile_det",
+            }
+    finally:
+        _reset_ocr_singletons()
+
+    # PaddleOCR 2.x: passes ocr_version while keeping show_log=False
+    v2_calls = []
+
+    class FakePaddleOCRv2:
+        def __init__(self, **kwargs):
+            v2_calls.append(kwargs)
+
+        def ocr(self, img, cls=True):
+            return []
+
+    fake_v2 = types.SimpleNamespace(__version__="2.9.1", PaddleOCR=FakePaddleOCRv2)
+    _reset_ocr_singletons()
+    try:
+        with (
+            _clean_mkldnn_env(),
+            patch.object(ocr_engine.sys, "platform", "linux"),
+            patch.dict(sys.modules, {"paddleocr": fake_v2}),
+        ):
+            get_paddle_ocr("vie", ocr_version="PP-OCRv4", ocr_profile="mobile")
+        assert v2_calls == [
+            {
+                "use_angle_cls": True,
+                "lang": "vi",
+                "show_log": False,
+                "use_gpu": False,
+                "ocr_version": "PP-OCRv4",
+            }
+        ]
+    finally:
+        _reset_ocr_singletons()

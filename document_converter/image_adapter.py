@@ -28,12 +28,24 @@ def _ocr_single_frame(
     use_structure: bool,
     page_number: Optional[int],
     document: Document,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
 ) -> List[Block]:
     blocks: List[Block] = []
+    model_kw = {
+        "ocr_version": ocr_version,
+        "ocr_profile": ocr_profile,
+        "det_model": det_model,
+        "rec_model": rec_model,
+    }
     if engine == "paddle":
         if use_structure:
             try:
-                blocks = run_structure_on_image(img_array, lang=ocr_lang, page_number=page_number)
+                blocks = run_structure_on_image(
+                    img_array, lang=ocr_lang, page_number=page_number, **model_kw
+                )
                 if blocks:
                     document.metadata["ocr_engine"] = "ppstructure"
                     return blocks
@@ -42,7 +54,7 @@ def _ocr_single_frame(
                 document.warn(f"Structure analysis failed ({exc}); falling back to plain OCR.")
 
         try:
-            blocks = run_plain_ocr_on_array(img_array, lang=ocr_lang)
+            blocks = run_plain_ocr_on_array(img_array, lang=ocr_lang, **model_kw)
             if page_number is not None:
                 for b in blocks:
                     b.source = {**b.source, "page": page_number}
@@ -76,6 +88,10 @@ def convert_image(
     ocr: str = "auto",
     ocr_lang: str = "vie",
     use_structure: bool = True,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
 ) -> Document:
     """Convert an image file (including multi-page TIFF) to a Document using layout-aware OCR."""
     try:
@@ -90,11 +106,21 @@ def convert_image(
             "No OCR engine available (install paddleocr or pytesseract, or check --ocr)."
         )
 
+    meta = {"ocr_mode": ocr, "ocr_engine": engine, "use_structure": use_structure}
+    if (ocr_profile or "auto").lower() != "auto":
+        meta["ocr_profile"] = ocr_profile
+    if ocr_version:
+        meta["ocr_version"] = ocr_version
+    if det_model:
+        meta["det_model"] = det_model
+    if rec_model:
+        meta["rec_model"] = rec_model
+
     document = Document(
         str(path),
         "image",
         path.stem,
-        metadata={"ocr_mode": ocr, "ocr_engine": engine, "use_structure": use_structure},
+        metadata=meta,
     )
 
     with Image.open(path) as pil_file:
@@ -119,6 +145,10 @@ def convert_image(
             use_structure=use_structure,
             page_number=page_number,
             document=document,
+            ocr_version=ocr_version,
+            ocr_profile=ocr_profile,
+            det_model=det_model,
+            rec_model=rec_model,
         )
         for b in frame_blocks:
             document.add(b)

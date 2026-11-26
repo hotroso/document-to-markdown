@@ -145,6 +145,21 @@ Default: `--lang vie`.
   document-to-markdown bilingual.pdf --ocr tesseract --lang vie+jpn
   ```
 
+### Choosing PaddleOCR Models & Speed Profile (`--ocr-profile`, `--ocr-version`, `--det-model`, `--rec-model`)
+
+By default (`--ocr-profile auto`), PaddleOCR uses its own default models. On CPU-only machines, PaddleOCR 3.x defaults to heavier `server` detection models — you can switch to lightweight `mobile` models for significantly faster inference:
+
+```bash
+# Fast CPU mode (uses PP-OCRv5_mobile_det while keeping the right script rec model for --lang)
+document-to-markdown scan.pdf --ocr-profile mobile
+
+# Pin a specific PaddleOCR generation (e.g. PP-OCRv5 or PP-OCRv4)
+document-to-markdown scan.pdf --ocr-profile mobile --ocr-version PP-OCRv5
+
+# Power-user explicit model overrides
+document-to-markdown scan.pdf --det-model PP-OCRv5_mobile_det --rec-model latin_PP-OCRv5_mobile_rec
+```
+
 ---
 
 ## 7. Excel Workbooks

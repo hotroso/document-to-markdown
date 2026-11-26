@@ -168,17 +168,31 @@ def _page_blocks(page, page_number: int) -> List[Block]:
     return blocks
 
 
-def _ocr_page_with_structure(page, page_number: int, lang: str) -> List[Block]:
+def _ocr_page_with_structure(
+    page,
+    page_number: int,
+    lang: str,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+) -> List[Block]:
     """Render page and run PP-Structure for layout + tables + reading order."""
     pix = page.get_pixmap(dpi=220)
     img_bytes = pix.tobytes("png")
+    model_kw = {
+        "ocr_version": ocr_version,
+        "ocr_profile": ocr_profile,
+        "det_model": det_model,
+        "rec_model": rec_model,
+    }
     try:
         import numpy as np
         from PIL import Image
 
         image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img_array = np.array(image)
-        return run_structure_on_image(img_array, lang=lang, page_number=page_number)
+        return run_structure_on_image(img_array, lang=lang, page_number=page_number, **model_kw)
     except Exception:
         # path fallback
         import tempfile
@@ -187,21 +201,35 @@ def _ocr_page_with_structure(page, page_number: int, lang: str) -> List[Block]:
             tmp.write(img_bytes)
             tmp_path = tmp.name
         try:
-            return run_structure_on_image(tmp_path, lang=lang, page_number=page_number)
+            return run_structure_on_image(tmp_path, lang=lang, page_number=page_number, **model_kw)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
 
-def _ocr_page_plain(page, page_number: int, lang: str) -> List[Block]:
+def _ocr_page_plain(
+    page,
+    page_number: int,
+    lang: str,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+) -> List[Block]:
     pix = page.get_pixmap(dpi=250)
     img_bytes = pix.tobytes("png")
+    model_kw = {
+        "ocr_version": ocr_version,
+        "ocr_profile": ocr_profile,
+        "det_model": det_model,
+        "rec_model": rec_model,
+    }
     try:
         import numpy as np
         from PIL import Image
 
         image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img_array = np.array(image)
-        blocks = run_plain_ocr_on_array(img_array, lang=lang)
+        blocks = run_plain_ocr_on_array(img_array, lang=lang, **model_kw)
         for b in blocks:
             b.source = {"page": page_number}
         return blocks
@@ -216,7 +244,7 @@ def _ocr_page_plain(page, page_number: int, lang: str) -> List[Block]:
             import numpy as np
 
             image = Image.open(tmp_path).convert("RGB")
-            blocks = run_plain_ocr_on_array(np.array(image), lang=lang)
+            blocks = run_plain_ocr_on_array(np.array(image), lang=lang, **model_kw)
             for b in blocks:
                 b.source = {"page": page_number}
             return blocks
@@ -288,6 +316,10 @@ def convert_pdf(
     preview: bool = False,
     password: Optional[str] = None,
     use_structure: bool = True,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
 ) -> Document:
     try:
         import fitz
@@ -295,21 +327,36 @@ def convert_pdf(
         raise RuntimeError("PDF support requires PyMuPDF. Install it with: pip install pymupdf") from exc
 
     engine = detect_ocr_engine(ocr)
+    model_kw = {
+        "ocr_version": ocr_version,
+        "ocr_profile": ocr_profile,
+        "det_model": det_model,
+        "rec_model": rec_model,
+    }
     pdf = fitz.open(path)
     try:
         if pdf.needs_pass:
             if not password or not pdf.authenticate(password):
                 raise RuntimeError("Password required or incorrect for this PDF")
+        meta: Dict[str, Any] = {
+            "pages": pdf.page_count,
+            "ocr_mode": ocr,
+            "ocr_engine": engine,
+            "use_structure": use_structure,
+        }
+        if (ocr_profile or "auto").lower() != "auto":
+            meta["ocr_profile"] = ocr_profile
+        if ocr_version:
+            meta["ocr_version"] = ocr_version
+        if det_model:
+            meta["det_model"] = det_model
+        if rec_model:
+            meta["rec_model"] = rec_model
         document = Document(
             str(path),
             "pdf",
             path.stem,
-            metadata={
-                "pages": pdf.page_count,
-                "ocr_mode": ocr,
-                "ocr_engine": engine,
-                "use_structure": use_structure,
-            },
+            metadata=meta,
         )
         page_count = min(pdf.page_count, 3) if preview else pdf.page_count
         page_blocks: List[List[Block]] = []
@@ -328,21 +375,21 @@ def convert_pdf(
                 try:
                     if engine == "paddle" and use_structure:
                         try:
-                            blocks = _ocr_page_with_structure(page, index + 1, ocr_lang)
+                            blocks = _ocr_page_with_structure(page, index + 1, ocr_lang, **model_kw)
                             if blocks:
                                 document.metadata["ocr_engine"] = "ppstructure"
                             else:
                                 document.warn(
                                     f"Page {index + 1}: structure returned empty; trying plain OCR."
                                 )
-                                blocks = _ocr_page_plain(page, index + 1, ocr_lang)
+                                blocks = _ocr_page_plain(page, index + 1, ocr_lang, **model_kw)
                         except Exception as se:
                             document.warn(
                                 f"Page {index + 1}: structure failed ({se}); plain OCR fallback."
                             )
-                            blocks = _ocr_page_plain(page, index + 1, ocr_lang)
+                            blocks = _ocr_page_plain(page, index + 1, ocr_lang, **model_kw)
                     elif engine == "paddle":
-                        blocks = _ocr_page_plain(page, index + 1, ocr_lang)
+                        blocks = _ocr_page_plain(page, index + 1, ocr_lang, **model_kw)
                     else:
                         blocks = _ocr_page_tesseract(page, index + 1, ocr_lang)
 

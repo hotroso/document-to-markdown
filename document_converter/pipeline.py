@@ -46,6 +46,10 @@ def convert_file(
     password: Optional[str] = None,
     recalculate: bool = True,
     use_structure: bool = True,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
 ) -> Path:
     """Convert one PDF, image or Excel file to Markdown, optionally exporting assets and metadata."""
     source = Path(input_path)
@@ -63,6 +67,10 @@ def convert_file(
             preview=preview,
             password=password,
             use_structure=use_structure,
+            ocr_version=ocr_version,
+            ocr_profile=ocr_profile,
+            det_model=det_model,
+            rec_model=rec_model,
         )
         if assets is not None:
             for block in document.blocks:
@@ -74,6 +82,10 @@ def convert_file(
             ocr=ocr,
             ocr_lang=ocr_lang,
             use_structure=use_structure,
+            ocr_version=ocr_version,
+            ocr_profile=ocr_profile,
+            det_model=det_model,
+            rec_model=rec_model,
         )
     elif suffix in {".xlsx", ".xlsm"}:
         document = convert_excel(source, recalculate=recalculate)

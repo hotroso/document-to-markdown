@@ -18,10 +18,10 @@ from .models import Block
 logger = logging.getLogger(__name__)
 
 _paddle_ocr = None
-_paddle_ocr_lang: Optional[str] = None
+_paddle_ocr_key: Optional[Tuple[Any, ...]] = None
 _paddle_ocr_mkldnn_disabled: bool = False
 _structure_engine = None
-_structure_lang: Optional[str] = None
+_structure_key: Optional[Tuple[Any, ...]] = None
 _structure_mkldnn_disabled: bool = False
 _force_disable_mkldnn: bool = False
 
@@ -215,9 +215,68 @@ def _silence_paddle_logger(paddleocr_module: Any) -> None:
             mod_logger.setLevel(logging.WARNING)
 
 
+def _normalize_model_options(
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+) -> Tuple[Optional[str], str, Optional[str], Optional[str]]:
+    version = (ocr_version or "").strip() or None
+    profile = (ocr_profile or "auto").strip().lower()
+    if profile not in {"auto", "mobile", "server"}:
+        profile = "auto"
+    det = (det_model or "").strip() or None
+    rec = (rec_model or "").strip() or None
+    return version, profile, det, rec
+
+
+def _resolve_paddle_model_kwargs(
+    mapped_lang: str,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build optional PaddleOCR 3.x model kwargs without altering defaults when unset."""
+    version, profile, det, rec = _normalize_model_options(
+        ocr_version=ocr_version,
+        ocr_profile=ocr_profile,
+        det_model=det_model,
+        rec_model=rec_model,
+    )
+    if profile in {"mobile", "server"}:
+        ver_prefix = version or "PP-OCRv5"
+        if det is None:
+            det = f"{ver_prefix}_{profile}_det"
+        # For non-Chinese scripts (e.g. vi -> latin_PP-OCRv5_mobile_rec), let Paddle pick
+        # the matching script recognition model unless explicitly overridden via rec_model.
+        if rec is None and mapped_lang == "ch":
+            rec = f"{ver_prefix}_{profile}_rec"
+
+    kwargs: Dict[str, Any] = {}
+    if version is not None:
+        kwargs["ocr_version"] = version
+    if det is not None:
+        kwargs["text_detection_model_name"] = det
+    if rec is not None:
+        kwargs["text_recognition_model_name"] = rec
+    return kwargs
+
+
+def _dedupe_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen = set()
+    unique: List[Dict[str, Any]] = []
+    for item in candidates:
+        key = tuple(sorted(item.items()))
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
 def _init_with_fallback(factory: Any, candidates: List[Dict[str, Any]]):
     last_exc: Optional[Exception] = None
-    for kwargs in candidates:
+    for kwargs in _dedupe_candidates(candidates):
         try:
             return factory(**kwargs)
         except (TypeError, ValueError) as exc:
@@ -232,15 +291,29 @@ def _init_with_fallback(factory: Any, candidates: List[Dict[str, Any]]):
     raise last_exc
 
 
-def get_paddle_ocr(lang: str = "vie", disable_mkldnn: Optional[bool] = None):
-    global _paddle_ocr, _paddle_ocr_lang, _paddle_ocr_mkldnn_disabled, _force_disable_mkldnn
+def get_paddle_ocr(
+    lang: str = "vie",
+    disable_mkldnn: Optional[bool] = None,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+):
+    global _paddle_ocr, _paddle_ocr_key, _paddle_ocr_mkldnn_disabled, _force_disable_mkldnn
     mapped = map_lang_for_paddle(lang)
+    version, profile, det, rec = _normalize_model_options(
+        ocr_version=ocr_version,
+        ocr_profile=ocr_profile,
+        det_model=det_model,
+        rec_model=rec_model,
+    )
+    cache_key = (mapped, version, profile, det, rec)
     effective_disable_mkldnn = (
         _should_disable_mkldnn() if disable_mkldnn is None else bool(disable_mkldnn)
     )
     if (
         _paddle_ocr is not None
-        and _paddle_ocr_lang == mapped
+        and _paddle_ocr_key == cache_key
         and (not effective_disable_mkldnn or _paddle_ocr_mkldnn_disabled)
     ):
         return _paddle_ocr
@@ -250,6 +323,14 @@ def get_paddle_ocr(lang: str = "vie", disable_mkldnn: Optional[bool] = None):
     from paddleocr import PaddleOCR
 
     is_v3 = _is_paddleocr_v3(paddleocr, PaddleOCR)
+    model_kwargs = _resolve_paddle_model_kwargs(
+        mapped,
+        ocr_version=version,
+        ocr_profile=profile,
+        det_model=det,
+        rec_model=rec,
+    )
+
     if is_v3:
         _silence_paddle_logger(paddleocr)
         base_v3 = {
@@ -258,26 +339,44 @@ def get_paddle_ocr(lang: str = "vie", disable_mkldnn: Optional[bool] = None):
             "use_doc_unwarping": False,
             "use_textline_orientation": False,
         }
-        if effective_disable_mkldnn:
-            candidates = [
-                {**base_v3, "enable_mkldnn": False},
-                {"lang": mapped, "enable_mkldnn": False},
-                base_v3,
+        mkldnn_extra = {"enable_mkldnn": False} if effective_disable_mkldnn else {}
+        candidates: List[Dict[str, Any]] = []
+        if model_kwargs:
+            candidates.append({**base_v3, **model_kwargs, **mkldnn_extra})
+            candidates.append({"lang": mapped, **model_kwargs, **mkldnn_extra})
+            if "ocr_version" in model_kwargs and len(model_kwargs) > 1:
+                no_ver = {k: v for k, v in model_kwargs.items() if k != "ocr_version"}
+                candidates.append({**base_v3, **no_ver, **mkldnn_extra})
+                candidates.append({"lang": mapped, **no_ver, **mkldnn_extra})
+            if mkldnn_extra:
+                candidates.append({**base_v3, **model_kwargs})
+                candidates.append({"lang": mapped, **model_kwargs})
+        if mkldnn_extra:
+            candidates.append({**base_v3, **mkldnn_extra})
+            candidates.append({"lang": mapped, **mkldnn_extra})
+        candidates.extend([base_v3, {"lang": mapped}])
+    else:
+        # PaddleOCR 2.x fallback (supports show_log=False, use_angle_cls, and ocr_version)
+        base_v2 = {"use_angle_cls": True, "lang": mapped, "show_log": False, "use_gpu": False}
+        ver_extra = {"ocr_version": version} if version else {}
+        mkldnn_extra = {"enable_mkldnn": False} if effective_disable_mkldnn else {}
+        candidates = []
+        if ver_extra:
+            if mkldnn_extra:
+                candidates.append({**base_v2, **ver_extra, **mkldnn_extra})
+            candidates.append({**base_v2, **ver_extra})
+            candidates.append({"use_angle_cls": True, "lang": mapped, "show_log": False, **ver_extra})
+            candidates.append({"use_angle_cls": True, "lang": mapped, **ver_extra})
+        if mkldnn_extra:
+            candidates.append({**base_v2, **mkldnn_extra})
+        candidates.extend(
+            [
+                base_v2,
+                {"use_angle_cls": True, "lang": mapped, "show_log": False},
+                {"use_angle_cls": True, "lang": mapped},
                 {"lang": mapped},
             ]
-        else:
-            candidates = [base_v3, {"lang": mapped}]
-    else:
-        # PaddleOCR 2.x fallback (supports show_log=False and use_angle_cls)
-        base_v2 = {"use_angle_cls": True, "lang": mapped, "show_log": False, "use_gpu": False}
-        candidates = (
-            [{**base_v2, "enable_mkldnn": False}] if effective_disable_mkldnn else []
-        ) + [
-            base_v2,
-            {"use_angle_cls": True, "lang": mapped, "show_log": False},
-            {"use_angle_cls": True, "lang": mapped},
-            {"lang": mapped},
-        ]
+        )
 
     try:
         _paddle_ocr = _init_with_fallback(PaddleOCR, candidates)
@@ -288,34 +387,65 @@ def get_paddle_ocr(lang: str = "vie", disable_mkldnn: Optional[bool] = None):
                 exc,
             )
             _force_disable_mkldnn = True
-            return get_paddle_ocr(lang, disable_mkldnn=True)
+            return get_paddle_ocr(
+                lang,
+                disable_mkldnn=True,
+                ocr_version=version,
+                ocr_profile=profile,
+                det_model=det,
+                rec_model=rec,
+            )
         raise
 
-    _paddle_ocr_lang = mapped
+    _paddle_ocr_key = cache_key
     _paddle_ocr_mkldnn_disabled = effective_disable_mkldnn
     logger.info(
-        "Loaded PaddleOCR (lang=%s, mkldnn=%s)",
+        "Loaded PaddleOCR (lang=%s, profile=%s, version=%s, mkldnn=%s)",
         mapped,
+        profile,
+        version or "default",
         "off" if effective_disable_mkldnn else "default",
     )
     return _paddle_ocr
 
 
-def get_structure_engine(lang: str = "vie", disable_mkldnn: Optional[bool] = None):
+def get_structure_engine(
+    lang: str = "vie",
+    disable_mkldnn: Optional[bool] = None,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+):
     """Prefer PPStructureV3; fall back to classic PPStructure."""
-    global _structure_engine, _structure_lang, _structure_mkldnn_disabled, _force_disable_mkldnn
+    global _structure_engine, _structure_key, _structure_mkldnn_disabled, _force_disable_mkldnn
     mapped = map_lang_for_paddle(lang)
+    version, profile, det, rec = _normalize_model_options(
+        ocr_version=ocr_version,
+        ocr_profile=ocr_profile,
+        det_model=det_model,
+        rec_model=rec_model,
+    )
+    cache_key = (mapped, version, profile, det, rec)
     effective_disable_mkldnn = (
         _should_disable_mkldnn() if disable_mkldnn is None else bool(disable_mkldnn)
     )
     if (
         _structure_engine is not None
-        and _structure_lang == mapped
+        and _structure_key == cache_key
         and (not effective_disable_mkldnn or _structure_mkldnn_disabled)
     ):
         return _structure_engine
 
     _prepare_paddle_env(force_disable_mkldnn=bool(disable_mkldnn))
+    model_kwargs = _resolve_paddle_model_kwargs(
+        mapped,
+        ocr_version=version,
+        ocr_profile=profile,
+        det_model=det,
+        rec_model=rec,
+    )
+    mkldnn_extra = {"enable_mkldnn": False} if effective_disable_mkldnn else {}
 
     # Try modern pipeline first (PaddleOCR 3.x; no show_log parameter)
     try:
@@ -323,17 +453,29 @@ def get_structure_engine(lang: str = "vie", disable_mkldnn: Optional[bool] = Non
         from paddleocr import PPStructureV3
 
         _silence_paddle_logger(paddleocr)
-        v3_candidates = (
-            [{"lang": mapped, "enable_mkldnn": False}, {"enable_mkldnn": False}]
-            if effective_disable_mkldnn
-            else []
-        ) + [{"lang": mapped}, {}]
+        v3_candidates: List[Dict[str, Any]] = []
+        if model_kwargs:
+            v3_candidates.append({"lang": mapped, **model_kwargs, **mkldnn_extra})
+            if "ocr_version" in model_kwargs and len(model_kwargs) > 1:
+                no_ver = {k: v for k, v in model_kwargs.items() if k != "ocr_version"}
+                v3_candidates.append({"lang": mapped, **no_ver, **mkldnn_extra})
+                v3_candidates.append({**no_ver, **mkldnn_extra})
+            v3_candidates.append({**model_kwargs, **mkldnn_extra})
+            if mkldnn_extra:
+                v3_candidates.append({"lang": mapped, **model_kwargs})
+                v3_candidates.append({**model_kwargs})
+        if mkldnn_extra:
+            v3_candidates.extend([{"lang": mapped, **mkldnn_extra}, dict(mkldnn_extra)])
+        v3_candidates.extend([{"lang": mapped}, {}])
+
         _structure_engine = _init_with_fallback(PPStructureV3, v3_candidates)
-        _structure_lang = mapped
+        _structure_key = cache_key
         _structure_mkldnn_disabled = effective_disable_mkldnn
         logger.info(
-            "Loaded PPStructureV3 (lang=%s, mkldnn=%s)",
+            "Loaded PPStructureV3 (lang=%s, profile=%s, version=%s, mkldnn=%s)",
             mapped,
+            profile,
+            version or "default",
             "off" if effective_disable_mkldnn else "default",
         )
         return _structure_engine
@@ -344,7 +486,14 @@ def get_structure_engine(lang: str = "vie", disable_mkldnn: Optional[bool] = Non
                 exc,
             )
             _force_disable_mkldnn = True
-            return get_structure_engine(lang, disable_mkldnn=True)
+            return get_structure_engine(
+                lang,
+                disable_mkldnn=True,
+                ocr_version=version,
+                ocr_profile=profile,
+                det_model=det,
+                rec_model=rec,
+            )
         logger.debug("PPStructureV3 unavailable: %s", exc)
 
     try:
@@ -370,7 +519,7 @@ def get_structure_engine(lang: str = "vie", disable_mkldnn: Optional[bool] = Non
                 {},
             ]
         _structure_engine = _init_with_fallback(PPStructure, structure_candidates)
-        _structure_lang = mapped
+        _structure_key = cache_key
         _structure_mkldnn_disabled = effective_disable_mkldnn
         logger.info("Loaded classic PPStructure")
         return _structure_engine
@@ -513,10 +662,27 @@ def _cluster_ocr_columns(
     return segments
 
 
-def run_plain_ocr_on_array(img_array, lang: str = "vie") -> List[Block]:
+def run_plain_ocr_on_array(
+    img_array,
+    lang: str = "vie",
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+) -> List[Block]:
     """Plain PaddleOCR → ordered paragraph blocks (line-grouped & multi-column aware)."""
     global _force_disable_mkldnn
-    engine = get_paddle_ocr(lang)
+    model_opts: Dict[str, Any] = {}
+    if ocr_version is not None:
+        model_opts["ocr_version"] = ocr_version
+    if (ocr_profile or "auto").strip().lower() != "auto":
+        model_opts["ocr_profile"] = ocr_profile
+    if det_model is not None:
+        model_opts["det_model"] = det_model
+    if rec_model is not None:
+        model_opts["rec_model"] = rec_model
+
+    engine = get_paddle_ocr(lang, **model_opts)
     lines_data: List[Tuple[str, float, Any]] = []
 
     if hasattr(engine, "predict"):
@@ -530,7 +696,7 @@ def run_plain_ocr_on_array(img_array, lang: str = "vie") -> List[Block]:
                 exc,
             )
             _force_disable_mkldnn = True
-            engine = get_paddle_ocr(lang, disable_mkldnn=True)
+            engine = get_paddle_ocr(lang, disable_mkldnn=True, **model_opts)
             preds = engine.predict(img_array)
         preds_list = list(preds) if preds is not None else []
         if preds_list:
@@ -554,7 +720,7 @@ def run_plain_ocr_on_array(img_array, lang: str = "vie") -> List[Block]:
                 exc,
             )
             _force_disable_mkldnn = True
-            engine = get_paddle_ocr(lang, disable_mkldnn=True)
+            engine = get_paddle_ocr(lang, disable_mkldnn=True, **model_opts)
             ocr_out = engine.ocr(img_array, cls=True)
         if ocr_out is not None and len(ocr_out) > 0 and ocr_out[0] is not None:
             for item in ocr_out[0]:
@@ -896,10 +1062,28 @@ def _looks_like_list(text: str) -> bool:
     )
 
 
-def run_structure_on_image(img_array_or_path, lang: str = "vie", page_number: Optional[int] = None) -> List[Block]:
+def run_structure_on_image(
+    img_array_or_path,
+    lang: str = "vie",
+    page_number: Optional[int] = None,
+    ocr_version: Optional[str] = None,
+    ocr_profile: str = "auto",
+    det_model: Optional[str] = None,
+    rec_model: Optional[str] = None,
+) -> List[Block]:
     """Full layout + table + reading-order analysis."""
     global _force_disable_mkldnn
-    engine = get_structure_engine(lang)
+    model_opts: Dict[str, Any] = {}
+    if ocr_version is not None:
+        model_opts["ocr_version"] = ocr_version
+    if (ocr_profile or "auto").strip().lower() != "auto":
+        model_opts["ocr_profile"] = ocr_profile
+    if det_model is not None:
+        model_opts["det_model"] = det_model
+    if rec_model is not None:
+        model_opts["rec_model"] = rec_model
+
+    engine = get_structure_engine(lang, **model_opts)
 
     # PPStructureV3
     if hasattr(engine, "predict"):
@@ -913,7 +1097,7 @@ def run_structure_on_image(img_array_or_path, lang: str = "vie", page_number: Op
                 exc,
             )
             _force_disable_mkldnn = True
-            engine = get_structure_engine(lang, disable_mkldnn=True)
+            engine = get_structure_engine(lang, disable_mkldnn=True, **model_opts)
             outputs = engine.predict(img_array_or_path)
         blocks: List[Block] = []
         for res in outputs or []:
@@ -933,7 +1117,7 @@ def run_structure_on_image(img_array_or_path, lang: str = "vie", page_number: Op
                 exc,
             )
             _force_disable_mkldnn = True
-            engine = get_structure_engine(lang, disable_mkldnn=True)
+            engine = get_structure_engine(lang, disable_mkldnn=True, **model_opts)
             result = engine(img_array_or_path)
         return structure_result_to_blocks(result, page_number=page_number)
 

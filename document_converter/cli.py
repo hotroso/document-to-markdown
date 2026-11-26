@@ -61,6 +61,27 @@ def _parser() -> argparse.ArgumentParser:
         help="OCR language (vie, eng, eng+vie, …). Default 'vie' also handles English/Latin in PaddleOCR.",
     )
     parser.add_argument(
+        "--ocr-profile",
+        choices=["auto", "mobile", "server"],
+        default="auto",
+        help="PaddleOCR model profile: auto (library default), mobile (fast/lightweight on CPU), or server (highest accuracy)",
+    )
+    parser.add_argument(
+        "--ocr-version",
+        default=None,
+        help="PaddleOCR model version (e.g. PP-OCRv5, PP-OCRv4, PP-OCRv3)",
+    )
+    parser.add_argument(
+        "--det-model",
+        default=None,
+        help="Explicit PaddleOCR text detection model name (e.g. PP-OCRv5_mobile_det)",
+    )
+    parser.add_argument(
+        "--rec-model",
+        default=None,
+        help="Explicit PaddleOCR text recognition model name (e.g. latin_PP-OCRv5_mobile_rec)",
+    )
+    parser.add_argument(
         "--no-structure",
         action="store_true",
         help="Disable PP-Structure layout/table analysis (use plain OCR only)",
@@ -144,6 +165,10 @@ def main(argv: List[str] | None = None) -> int:
                 password=password,
                 recalculate=not args.no_recalculate,
                 use_structure=not args.no_structure,
+                ocr_version=args.ocr_version,
+                ocr_profile=args.ocr_profile,
+                det_model=args.det_model,
+                rec_model=args.rec_model,
             )
             print(f"[ok] {source} -> {result}")
         except Exception as exc:
