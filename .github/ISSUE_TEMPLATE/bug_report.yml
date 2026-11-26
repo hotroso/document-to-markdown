@@ -1,0 +1,38 @@
+name: Bug Report
+description: Report a bug or unexpected conversion output
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the issue and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command / Code to Reproduce
+      placeholder: |
+        document-to-markdown sample.pdf --ocr auto --lang vie
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, package versions
+      value: |
+        - OS: (e.g. Windows 11, Ubuntu 24.04, macOS 15)
+        - Python:
+        - document-to-markdown:
+        - paddleocr / paddlepaddle:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Traceback
+      description: Run with `-v` and paste any relevant output.
+      render: shell

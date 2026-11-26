@@ -7,6 +7,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/hotroso/document-to-markdown?style=social)](https://github.com/hotroso/document-to-markdown/stargazers)
 
+![document-to-markdown banner](docs/social-preview.png)
+
 Local, zero-config converter for **PDF**, **images**, and **Excel** files into clean, AI/RAG-ready **Markdown**.
 
 Designed for personal AI, LLM, and RAG workflows where document layouts vary wildly and you want clean `.md` files out of the box without complex setup.
@@ -27,6 +29,19 @@ Designed for personal AI, LLM, and RAG workflows where document layouts vary wil
 | **PDF** | `.pdf` | Native text extraction + automatic OCR on scanned/image-dominated pages, multi-column ordering, repeated header/footer removal, password prompt (`--password`), optional image export (`--assets`). |
 | **Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff` | EXIF auto-rotation, multi-frame TIFF support, layout/table analysis (PP-Structure) or line-grouped plain OCR, automatic Tesseract fallback. |
 | **Excel** | `.xlsx`, `.xlsm` | Multi-region sheet splitting, merged cell handling, 3-tier formula evaluation (cached → LibreOffice → `formulas`), numeric column alignment. |
+
+## Why `document-to-markdown`?
+
+| Capability | `document-to-markdown` | `markitdown` | `pymupdf4llm` | `docling` |
+|------------|:----------------------:|:------------:|:-------------:|:---------:|
+| 100% local & offline | Yes | Yes | Yes | Yes |
+| Hybrid native PDF + automatic scan OCR | Yes (PyMuPDF + PaddleOCR) | Basic / optional | Native PDF focus | Yes |
+| PP-StructureV3 layout & table OCR | Yes (with Tesseract fallback) | No | No | Yes (DocLayNet) |
+| Vietnamese + English multilingual OCR out of the box | Yes (`--lang vie`) | Limited | Native only | Depends on OCR engine |
+| Configurable CPU/GPU OCR speed (`mobile` / `server`) | Yes (`--ocr-profile`) | No | N/A | Configurable |
+| Multi-table Excel splitting + 3-tier formula evaluation | Yes | Basic sheet dump | No | Basic |
+| Clean single `.md` output by default (opt-in assets/meta) | Yes | Yes | Yes | Configurable |
+| Prebuilt standalone executables (Win / Linux / macOS) | Yes | No | No | No |
 
 ## Installation
 
