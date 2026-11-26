@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import inspect
 import io
 import logging
@@ -153,6 +154,16 @@ def _is_pir_mkldnn_error(exc: BaseException) -> bool:
     )
 
 
+def _module_available(name: str) -> bool:
+    """Check whether a module is installed without importing it (avoids heavy Paddle startup)."""
+    if name in sys.modules:
+        return sys.modules[name] is not None
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def detect_ocr_engine(requested: str) -> str:
     """Resolve requested OCR engine ('auto' prefers PaddleOCR, falls back to Tesseract)."""
     requested = (requested or "auto").lower()
@@ -162,17 +173,11 @@ def detect_ocr_engine(requested: str) -> str:
         return "tesseract"
     if requested == "paddle":
         return "paddle"
-    try:
-        _prepare_paddle_env()
-        import paddleocr  # noqa: F401
+    if _module_available("paddleocr"):
         return "paddle"
-    except ImportError:
-        pass
-    try:
-        import pytesseract  # noqa: F401
+    if _module_available("pytesseract"):
         return "tesseract"
-    except ImportError:
-        return "off"
+    return "off"
 
 
 def _parse_major_version(version: Any) -> Optional[int]:

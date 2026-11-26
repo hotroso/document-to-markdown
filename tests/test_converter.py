@@ -1044,3 +1044,44 @@ def test_email_html_and_csv_adapters_end_to_end(tmp_path: Path) -> None:
     out_tsv = tmp_path / "data_tsv.md"
     assert main([str(tsv_file), "-o", str(out_tsv)]) == 0
     assert "| foo | bar |" in out_tsv.read_text(encoding="utf-8")
+
+
+def test_lazy_ocr_detection_does_not_import_paddle_for_digital_pdf(tmp_path: Path) -> None:
+    from document_converter.ocr_engine import detect_ocr_engine
+    from document_converter.pdf_adapter import convert_pdf
+
+    # 1. detect_ocr_engine uses find_spec without importing paddleocr
+    saved_paddle = sys.modules.pop("paddleocr", None)
+    try:
+        with patch("document_converter.ocr_engine.importlib.util.find_spec", side_effect=lambda n: object() if n == "paddleocr" else None):
+            assert detect_ocr_engine("auto") == "paddle"
+            assert "paddleocr" not in sys.modules
+    finally:
+        if saved_paddle is not None:
+            sys.modules["paddleocr"] = saved_paddle
+
+    # 2. Digital PDF with no scanned pages never calls detect_ocr_engine or opens pypdfium2
+    fake_page = MagicMock()
+    fake_page.width = 600.0
+    fake_page.height = 800.0
+    fake_page.images = []
+    fake_page.find_tables.return_value = []
+    fake_page.extract_words.return_value = [
+        {"text": "Hello", "x0": 50.0, "top": 50.0, "x1": 100.0, "bottom": 62.0, "size": 11.0},
+        {"text": "digital", "x0": 105.0, "top": 50.0, "x1": 160.0, "bottom": 62.0, "size": 11.0},
+        {"text": "PDF", "x0": 165.0, "top": 50.0, "x1": 200.0, "bottom": 62.0, "size": 11.0},
+    ]
+    fake_pdf = MagicMock()
+    fake_pdf.pages = [fake_page]
+    fake_pdfplumber = types.SimpleNamespace(open=MagicMock(return_value=fake_pdf))
+
+    dummy_pdf = tmp_path / "digital.pdf"
+    dummy_pdf.write_bytes(b"%PDF-1.4")
+    with (
+        patch.dict(sys.modules, {"pdfplumber": fake_pdfplumber}),
+        patch("document_converter.pdf_adapter.detect_ocr_engine", side_effect=AssertionError("should not be called")) as mock_detect,
+    ):
+        doc = convert_pdf(dummy_pdf, ocr="auto")
+    assert mock_detect.call_count == 0
+    assert doc.metadata["ocr_engine"] == "not_needed"
+    assert [b.text for b in doc.blocks] == ["Hello digital PDF"]

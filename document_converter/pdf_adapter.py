@@ -485,7 +485,8 @@ def convert_pdf(
             "PDF support requires pdfplumber. Install it with: pip install pdfplumber"
         ) from exc
 
-    engine = detect_ocr_engine(ocr)
+    ocr_mode = (ocr or "auto").lower()
+    engine: Optional[str] = "off" if ocr_mode in {"off", "none"} else None
     model_kw = {
         "ocr_version": ocr_version,
         "ocr_profile": ocr_profile,
@@ -521,7 +522,7 @@ def convert_pdf(
         meta: Dict[str, Any] = {
             "pages": total_pages,
             "ocr_mode": ocr,
-            "ocr_engine": engine,
+            "ocr_engine": "off" if engine == "off" else "not_needed",
             "use_structure": use_structure,
         }
         if (ocr_profile or "auto").lower() != "auto":
@@ -545,10 +546,17 @@ def convert_pdf(
             page = pdf.pages[index]
             native = _page_blocks(page, index + 1)
             native_text = " ".join(block.text for block in native).strip()
-            use_ocr = engine != "off" and (
-                ocr in {"paddle", "tesseract"}
-                or (ocr == "auto" and _page_needs_ocr(page, native_text))
+            needs_ocr = ocr_mode in {"paddle", "tesseract"} or (
+                ocr_mode == "auto" and _page_needs_ocr(page, native_text)
             )
+            if needs_ocr:
+                if engine is None:
+                    engine = detect_ocr_engine(ocr_mode)
+                    if engine != "off":
+                        document.metadata["ocr_engine"] = engine
+                use_ocr = engine != "off"
+            else:
+                use_ocr = False
             blocks = native
 
             if use_ocr:
