@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "document-to-markdown"
-version = "0.5.0"
+version = "0.6.0"
 description = "100% local PDF, Office (DOCX, PPTX, Excel), Email, HTML, CSV, and image to AI-friendly Markdown converter"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -29,7 +29,7 @@ classifiers = [
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Intended Audience :: End Users/Desktop",
-  "License :: OSI Approved :: MIT License",
+  "License :: Other/Proprietary License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -38,7 +38,8 @@ classifiers = [
   "Topic :: Utilities",
 ]
 dependencies = [
-  "PyMuPDF>=1.23.0",
+  "pdfplumber>=0.11.0",
+  "pypdfium2>=4.25.0",
   "openpyxl>=3.1.5",
 ]
 
@@ -54,10 +55,10 @@ tesseract = [
   "Pillow>=10.0.0",
 ]
 excel-calc = [
-  "formulas>=1.2.0",
+  "xlcalculator>=0.5.0",
 ]
 outlook = [
-  "extract-msg>=0.48.0",
+  "olefile>=0.47",
 ]
 all = [
   "paddlepaddle>=2.6.0",
@@ -65,8 +66,8 @@ all = [
   "pytesseract>=0.3.10",
   "Pillow>=10.0.0",
   "numpy>=1.24.0",
-  "formulas>=1.2.0",
-  "extract-msg>=0.48.0",
+  "xlcalculator>=0.5.0",
+  "olefile>=0.47",
 ]
 dev = [
   "pytest>=8.0.0",

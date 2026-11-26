@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/hotroso/document-to-markdown?include_prereleases&sort=semver)](https://github.com/hotroso/document-to-markdown/releases)
 [![Downloads](https://img.shields.io/github/downloads/hotroso/document-to-markdown/total)](https://github.com/hotroso/document-to-markdown/releases)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)](pyproject.toml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: MIT + Commons Clause](https://img.shields.io/badge/License-MIT%20%2B%20Commons%20Clause-blue.svg)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/hotroso/document-to-markdown?style=social)](https://github.com/hotroso/document-to-markdown/stargazers)
 
 ![document-to-markdown banner](docs/social-preview.png)
@@ -17,7 +17,7 @@ Designed for personal and enterprise AI, LLM, and RAG workflows where document l
 
 - **Clean Markdown by default**: Outputs only the `.md` file by default. Extracted image/attachment folders (`_assets`) and JSON metadata sidecars (`.meta.json`) are opt-in via `--assets` and `--meta`.
 - **Broad local document support out of the box**: Zero extra dependencies for **Word (`.docx`)**, **PowerPoint (`.pptx` with speaker notes)**, **Email (`.eml`)**, **HTML**, and **CSV/TSV**, plus **PDF**, **Excel (`.xlsx`/`.xlsm`)**, **images**, and optional **Outlook (`.msg`)**.
-- **Layout-aware PDF & Image conversion**: Combines native PDF text extraction (PyMuPDF) with automatic OCR on scanned or image-heavy pages, powered by **PP-Structure / PP-StructureV3** and **PaddleOCR** (with **Tesseract** fallback).
+- **Layout-aware PDF & Image conversion**: Combines native PDF text & table extraction (`pdfplumber` + `pypdfium2`) with automatic OCR on scanned or image-heavy pages, powered by **PP-Structure / PP-StructureV3** and **PaddleOCR** (with **Tesseract** fallback).
 - **Simple multilingual OCR**: Defaults to `--lang vie`, which handles **Vietnamese, English, and Latin-script text** out of the box in PaddleOCR. Combined specifications such as `eng+vie` or `eng+jpn` automatically select the broader recognition model instead of dropping secondary languages.
 - **Phone photo & scan friendly**: Automatically applies EXIF orientation correction, handles multi-page TIFFs, detects multi-column reading order, and removes repeated page headers/footers.
 - **Smart Excel ingestion**: Splits multi-region worksheets into separate tables, expands merged cells, and resolves formula values via cached Excel values, headless LibreOffice recalculation, or optional pure-Python evaluation.
@@ -31,8 +31,8 @@ Designed for personal and enterprise AI, LLM, and RAG workflows where document l
 | **Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff` | EXIF auto-rotation, multi-frame TIFF support, layout/table analysis (PP-Structure) or line-grouped plain OCR, automatic Tesseract fallback. |
 | **Word** | `.docx` | Pure-Python OOXML parsing (zero extra dependencies): headings, paragraphs, hyperlinks, nested ordered/unordered lists, tables with merged cells, tracked-deletion filtering, footnotes, optional `--assets` image export. |
 | **PowerPoint** | `.pptx` | True presentation slide ordering, slide titles, visual reading order, nested bullets, tables, **speaker notes**, slide dividers (`---`), optional `--assets` image export. |
-| **Excel** | `.xlsx`, `.xlsm` | Multi-region sheet splitting, merged cell handling, 3-tier formula evaluation (cached → LibreOffice → `formulas`), numeric column alignment. |
-| **Email** | `.eml`, `.msg` | Headers table (`From`, `To`, `Cc`, `Date`), plain text / HTML body conversion, quoted replies, attachment listing & optional `--assets` export (`.msg` via `[outlook]` extra). |
+| **Excel** | `.xlsx`, `.xlsm` | Multi-region sheet splitting, merged cell handling, 3-tier formula evaluation (cached → LibreOffice → `xlcalculator`), numeric column alignment. |
+| **Email** | `.eml`, `.msg` | Headers table (`From`, `To`, `Cc`, `Date`), plain text / HTML body conversion, quoted replies, attachment listing & optional `--assets` export (`.msg` via `[outlook]` / BSD `olefile`). |
 | **Web & Tabular** | `.html`, `.htm`, `.csv`, `.tsv` | Clean semantic HTML extraction (headings, lists, code fences, blockquotes, colspan/rowspan tables; strips scripts/styles) and auto-delimiter CSV/TSV tables. |
 
 ## Why `document-to-markdown`?
@@ -41,12 +41,13 @@ Designed for personal and enterprise AI, LLM, and RAG workflows where document l
 |------------|:----------------------:|:------------:|:-------------:|:---------:|
 | Supported formats | PDF, DOCX, PPTX, XLSX, EML/MSG, HTML, CSV/TSV, Images | Broadest (PDF, Office, MSG, HTML, EPUB, audio, ZIP…) | PDF, XPS, EPUB, Office (via PyMuPDF) | PDF, DOCX, PPTX, XLSX, HTML, Images |
 | 100% local & offline | Yes | Yes (LLM needed for image captions) | Yes | Yes |
-| Hybrid native PDF + automatic scan OCR | Yes (PyMuPDF + PaddleOCR) | Text-only PDF (`pdfminer`) | Native PDF focus | Yes |
+| Hybrid native PDF + automatic scan OCR | Yes (`pdfplumber` + `pypdfium2` + PaddleOCR) | Text-only PDF (`pdfminer`) | Native PDF focus | Yes |
 | Layout & table OCR | PP-StructureV3 + Tesseract fallback | No built-in OCR | No | DocLayNet + OCR |
 | Vietnamese + English OCR out of the box | Yes (`--lang vie`) | External LLM required | Native text only | Depends on OCR backend |
 | Configurable CPU/GPU OCR speed (`mobile` / `server`) | Yes (`--ocr-profile`) | No | N/A | Configurable |
 | Multi-table Excel splitting + 3-tier formula evaluation | Yes | Basic sheet dump | No | Basic |
 | Prebuilt standalone executables (Win / Linux / macOS) | Yes | No | No | No |
+| Dependency license stack | 100% permissive (MIT / Apache-2.0 / BSD) | Permissive | AGPL-3.0 (`PyMuPDF`) | MIT |
 
 ## Installation
 
@@ -166,26 +167,32 @@ output_md = convert_file(
 ## How It Works
 
 ### PDF & Image Layout Analysis
-1. For PDFs in `--ocr auto` mode, pages with native text are extracted directly via PyMuPDF with multi-column clustering.
-2. Scanned pages (little native text) or image-dominated pages (images covering `>= 35%` of the page) are automatically routed to OCR.
+1. For PDFs in `--ocr auto` mode, pages with native text and ruled tables are extracted directly via `pdfplumber` with multi-column clustering.
+2. Scanned pages (little native text) or image-dominated pages (images covering `>= 35%` of the page) are rendered with `pypdfium2` and automatically routed to OCR.
 3. When PaddleOCR + PP-Structure is available (default), layout regions (titles, headings, paragraphs, lists, HTML tables) are reconstructed in reading order. Otherwise it falls back gracefully to line-grouped plain PaddleOCR or Tesseract.
 
 ### Excel Formula Evaluation (Multi-Tier)
 When a workbook contains formulas, the converter resolves cell values in order:
 1. **Cached values** already saved in the `.xlsx` file (fastest).
 2. **LibreOffice** headless recalculation on a temporary copy (most compatible, requires `soffice` or `libreoffice` on `PATH`).
-3. **Pure-Python** evaluation via the optional `formulas` package (`pip install -e ".[excel-calc]"`).
+3. **Pure-Python** evaluation via the optional MIT-licensed `xlcalculator` package (`pip install -e ".[excel-calc]"`).
 4. Retain the formula text and emit a conversion warning if no calculated value is available.
 
 ## Limitations
 
-- Legacy `.xls` files are not supported directly (convert to `.xlsx` first, e.g. with LibreOffice).
+- Legacy `.xls`, `.doc`, and `.ppt` files are not supported directly (convert them to `.xlsx`/`.docx`/`.pptx` first, e.g. with LibreOffice).
 - Heavily nested tables or handwritten forms remain challenging for local OCR.
 - PP-Structure with high-DPI page rendering uses more CPU/RAM than plain native PDF text extraction.
-- Pure-Python `formulas` coverage is partial for complex array formulas or Excel-specific functions; LibreOffice is recommended for formula-heavy workbooks.
+- Pure-Python `xlcalculator` coverage is partial for complex array formulas or Excel-specific functions; LibreOffice is recommended for formula-heavy workbooks.
 - Mixing two completely different writing systems in a single PaddleOCR pass (e.g., Vietnamese + Japanese on the same page) is limited by single-model recognition dictionaries; use `--ocr tesseract` with system language packs when needed.
 
 ## Changelog
+
+### 0.6.0
+- Switch project license to **MIT License with Commons Clause v1.0** (source-available) backed by a 100% permissive dependency stack (no AGPL, GPL, or EUPL dependencies)
+- Replace `PyMuPDF` (AGPL-3.0) with `pdfplumber` (MIT) + `pypdfium2` (Apache-2.0 / BSD-3-Clause), adding native ruled-table detection for digital PDFs
+- Replace `extract-msg` (GPL-3.0) with a native OLE2/MAPI `.msg` parser using `olefile` (BSD-2-Clause)
+- Replace `formulas` (EUPL-1.2) with `xlcalculator` (MIT) for optional pure-Python Excel formula evaluation
 
 ### 0.5.0
 - Add zero-dependency native adapters for Word (`.docx` with headings, nested lists, merged-cell tables, hyperlinks, tracked-deletion filtering, footnotes, `--assets`), PowerPoint (`.pptx` with true slide order, bullets, tables, speaker notes, `--assets`), Email (`.eml`), HTML (`.html`/`.htm` with code blocks, blockquotes, colspan/rowspan tables), and CSV/TSV (`.csv`/`.tsv`)
@@ -227,7 +234,11 @@ When a workbook contains formulas, the converter resolves cell values in order:
 
 ## License
 
-Released under the [MIT License](LICENSE).
+Released under the [MIT License with Commons Clause v1.0](LICENSE) (source-available).
+
+- **Free to use, modify, and integrate** for personal, educational, research, and internal business workflows.
+- **Commercial resale / hosted SaaS restriction**: Under the Commons Clause, selling the software itself or offering a paid product/hosted service whose value derives substantially from `document-to-markdown` requires a separate commercial license from **hotroso** (`hotrogiaiphapso@gmail.com`).
+- All runtime dependencies use permissive licenses (MIT, Apache-2.0, BSD, HPND).
 
 ## Repository Stats
 
