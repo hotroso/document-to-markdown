@@ -1,11 +1,11 @@
 # Document to Markdown
 
-[![CI](https://github.com/sinhsac/document-to-markdown/actions/workflows/ci.yml/badge.svg)](https://github.com/sinhsac/document-to-markdown/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/sinhsac/document-to-markdown?include_prereleases&sort=semver)](https://github.com/sinhsac/document-to-markdown/releases)
-[![Downloads](https://img.shields.io/github/downloads/sinhsac/document-to-markdown/total)](https://github.com/sinhsac/document-to-markdown/releases)
+[![CI](https://github.com/hotroso/document-to-markdown/actions/workflows/ci.yml/badge.svg)](https://github.com/hotroso/document-to-markdown/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hotroso/document-to-markdown?include_prereleases&sort=semver)](https://github.com/hotroso/document-to-markdown/releases)
+[![Downloads](https://img.shields.io/github/downloads/hotroso/document-to-markdown/total)](https://github.com/hotroso/document-to-markdown/releases)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/sinhsac/document-to-markdown?style=social)](https://github.com/sinhsac/document-to-markdown/stargazers)
+[![Stars](https://img.shields.io/github/stars/hotroso/document-to-markdown?style=social)](https://github.com/hotroso/document-to-markdown/stargazers)
 
 Local, zero-config converter for **PDF**, **images**, and **Excel** files into clean, AI/RAG-ready **Markdown**.
 
@@ -38,23 +38,23 @@ Install directly from GitHub in one command without cloning:
 
 ```bash
 # Base install (native PDF + Excel)
-pip install git+https://github.com/sinhsac/document-to-markdown.git
+pip install git+https://github.com/hotroso/document-to-markdown.git
 
 # Recommended: add PaddleOCR + PP-Structure layout/table analysis
-pip install "document-to-markdown[ocr] @ git+https://github.com/sinhsac/document-to-markdown.git"
+pip install "document-to-markdown[ocr] @ git+https://github.com/hotroso/document-to-markdown.git"
 
 # Optional: Tesseract OCR fallback or Excel formula engine
-pip install "document-to-markdown[tesseract] @ git+https://github.com/sinhsac/document-to-markdown.git"
-pip install "document-to-markdown[excel-calc] @ git+https://github.com/sinhsac/document-to-markdown.git"
+pip install "document-to-markdown[tesseract] @ git+https://github.com/hotroso/document-to-markdown.git"
+pip install "document-to-markdown[excel-calc] @ git+https://github.com/hotroso/document-to-markdown.git"
 
 # Install everything
-pip install "document-to-markdown[all] @ git+https://github.com/sinhsac/document-to-markdown.git"
+pip install "document-to-markdown[all] @ git+https://github.com/hotroso/document-to-markdown.git"
 ```
 
 ### From Local Source (Development)
 
 ```bash
-git clone https://github.com/sinhsac/document-to-markdown.git
+git clone https://github.com/hotroso/document-to-markdown.git
 cd document-to-markdown
 
 pip install -e .
@@ -68,7 +68,7 @@ For detailed workflows, troubleshooting, and examples, see the [Usage Guide](USA
 
 ### Prebuilt Installers & Packages
 
-Prebuilt Python packages (`.whl`, `.tar.gz`) and standalone executables (Linux, Windows `.exe`, macOS — bundling native PDF, Excel, and Tesseract OCR support) are automatically built by [GitHub Actions](.github/workflows/release.yml) and published on the [Releases page](https://github.com/sinhsac/document-to-markdown/releases). For full PaddleOCR / PP-Structure support, install from source with `pip install -e ".[ocr]"`.
+Prebuilt Python packages (`.whl`, `.tar.gz`) and standalone executables (Linux, Windows `.exe`, macOS — bundling native PDF, Excel, and Tesseract OCR support) are automatically built by [GitHub Actions](.github/workflows/release.yml) and published on the [Releases page](https://github.com/hotroso/document-to-markdown/releases). For full PaddleOCR / PP-Structure support, install from source with `pip install -e ".[ocr]"`.
 
 ## Usage
 
@@ -205,4 +205,4 @@ Released under the [MIT License](LICENSE).
 
 ## Repository Stats
 
-[![Star History Chart](https://api.star-history.com/svg?repos=sinhsac/document-to-markdown&type=Date)](https://star-history.com/#sinhsac/document-to-markdown&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=hotroso/document-to-markdown&type=Date)](https://star-history.com/#hotroso/document-to-markdown&Date)

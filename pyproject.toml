@@ -68,9 +68,9 @@ dev = [
 document-to-markdown = "document_converter.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/sinhsac/document-to-markdown"
-Repository = "https://github.com/sinhsac/document-to-markdown"
-Issues = "https://github.com/sinhsac/document-to-markdown/issues"
+Homepage = "https://github.com/hotroso/document-to-markdown"
+Repository = "https://github.com/hotroso/document-to-markdown"
+Issues = "https://github.com/hotroso/document-to-markdown/issues"
 
 [tool.setuptools]
 packages = ["document_converter"]
