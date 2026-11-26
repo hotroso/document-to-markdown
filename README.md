@@ -155,6 +155,10 @@ When a workbook contains formulas, the converter resolves cell values in order:
 
 ## Changelog
 
+### 0.3.2
+- Fix PaddleOCR 3.x+ initialization by omitting the removed `show_log=False` constructor argument and silencing verbose logs via Python `logging`
+- Preserve PaddleOCR 2.x constructor fallback (`use_angle_cls`, `show_log=False`, `use_gpu=False`) and handle both `TypeError` and `ValueError` fallbacks across `PaddleOCR`, `PPStructureV3`, and classic `PPStructure`
+
 ### 0.3.1
 - Make `.md` the sole default output; opt in to `_assets` and `.meta.json` via `--assets` (`--images`) and `--meta`
 - Default `--lang` to `vie` (covers Vietnamese + English/Latin in PaddleOCR) and preserve secondary non-English languages in multi-language specs like `eng+vie`
