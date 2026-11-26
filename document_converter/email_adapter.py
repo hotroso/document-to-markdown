@@ -178,66 +178,126 @@ def _convert_eml(path: Path, output_assets: Optional[Path] = None) -> Document:
     return document
 
 
-def _convert_msg(path: Path, output_assets: Optional[Path] = None) -> Document:
+def _ole_read_stream(ole, path_parts: List[str]) -> Optional[bytes]:
+    if not ole.exists(path_parts):
+        return None
     try:
-        import extract_msg
+        return ole.openstream(path_parts).read()
+    except Exception:
+        return None
+
+
+def _ole_read_text_prop(ole, prefix: List[str], prop_id: str) -> str:
+    """Read a MAPI Unicode (001F) or ANSI (001E) string property from an OLE2 .msg file."""
+    data = _ole_read_stream(ole, prefix + [f"__substg1.0_{prop_id}001F"])
+    if data is not None:
+        return data.decode("utf-16-le", errors="replace").rstrip("\x00").strip()
+    data = _ole_read_stream(ole, prefix + [f"__substg1.0_{prop_id}001E"])
+    if data is not None:
+        for enc in ("utf-8", "cp1252", "latin-1"):
+            try:
+                return data.decode(enc).rstrip("\x00").strip()
+            except UnicodeDecodeError:
+                continue
+    return ""
+
+
+def _ole_read_html_prop(ole, prefix: List[str]) -> str:
+    data = _ole_read_stream(ole, prefix + ["__substg1.0_10130102"])
+    if data is not None:
+        for enc in ("utf-8", "cp1252", "latin-1"):
+            try:
+                return data.decode(enc).rstrip("\x00").strip()
+            except UnicodeDecodeError:
+                continue
+    return _ole_read_text_prop(ole, prefix, "1013")
+
+
+def _parse_transport_headers(raw_headers: str) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    if not raw_headers.strip():
+        return result
+    try:
+        parsed = email.message_from_string(raw_headers, policy=policy.default)
+        for key in ("from", "to", "cc", "date", "subject"):
+            val = str(parsed.get(key) or "").strip()
+            if val:
+                result[key] = val
+    except Exception:
+        pass
+    return result
+
+
+def _convert_msg(path: Path, output_assets: Optional[Path] = None) -> Document:
+    """Parse Outlook .msg (OLE2/MAPI) using permissive BSD-licensed olefile."""
+    try:
+        import olefile
     except ImportError as exc:
         raise RuntimeError(
-            "Outlook .msg support requires extract-msg. "
-            "Install it with: pip install 'document-to-markdown[outlook]' (or pip install extract-msg)"
+            "Outlook .msg support requires olefile. "
+            "Install it with: pip install 'document-to-markdown[outlook]' (or pip install olefile)"
         ) from exc
 
-    msg = extract_msg.Message(str(path))
-    try:
-        subject = str(getattr(msg, "subject", "") or "").strip()
-        sender = str(getattr(msg, "sender", "") or "").strip()
-        recipients = str(getattr(msg, "to", "") or "").strip()
-        cc = str(getattr(msg, "cc", "") or "").strip()
-        date_val = str(getattr(msg, "date", "") or "").strip()
-        plain_body = str(getattr(msg, "body", "") or "")
-        raw_html = getattr(msg, "htmlBody", None)
-        if isinstance(raw_html, bytes):
-            html_body = raw_html.decode("utf-8", errors="replace")
+    with olefile.OleFileIO(str(path)) as ole:
+        transport = _parse_transport_headers(_ole_read_text_prop(ole, [], "007D"))
+        subject = _ole_read_text_prop(ole, [], "0037") or transport.get("subject", "")
+        sender_name = _ole_read_text_prop(ole, [], "0C1A")
+        sender_addr = (
+            _ole_read_text_prop(ole, [], "0C1F")
+            or _ole_read_text_prop(ole, [], "5D01")
+            or _ole_read_text_prop(ole, [], "0065")
+        )
+        if sender_name and sender_addr and sender_addr.lower() not in sender_name.lower():
+            sender = f"{sender_name} <{sender_addr}>"
         else:
-            html_body = str(raw_html or "")
+            sender = sender_name or sender_addr or transport.get("from", "")
 
+        recipients = _ole_read_text_prop(ole, [], "0E04") or transport.get("to", "")
+        cc = _ole_read_text_prop(ole, [], "0E03") or transport.get("cc", "")
+        date_val = transport.get("date", "")
+        plain_body = _ole_read_text_prop(ole, [], "1000")
+        html_body = _ole_read_html_prop(ole, [])
+
+        # Discover attachment storages (__attach_version1.0_#XXXXXXXX)
+        attach_dirs = sorted(
+            {
+                entry[0]
+                for entry in ole.listdir(streams=True, storages=False)
+                if entry and entry[0].startswith("__attach_version1.0_")
+            }
+        )
         attachments: List[Tuple[str, Optional[bytes], str]] = []
-        for att in getattr(msg, "attachments", []) or []:
+        for idx, folder in enumerate(attach_dirs, start=1):
+            prefix = [folder]
             fname = (
-                getattr(att, "longFilename", None)
-                or getattr(att, "shortFilename", None)
-                or getattr(att, "name", None)
-                or "attachment"
+                _ole_read_text_prop(ole, prefix, "3707")
+                or _ole_read_text_prop(ole, prefix, "3704")
+                or f"attachment-{idx:02d}"
             )
-            data = getattr(att, "data", None)
-            payload = data if isinstance(data, bytes) else None
-            mime = str(getattr(att, "mimetype", "") or "")
-            attachments.append((str(fname), payload, mime))
+            mime = _ole_read_text_prop(ole, prefix, "370E") or "application/octet-stream"
+            payload = _ole_read_stream(ole, prefix + ["__substg1.0_37010102"])
+            attachments.append((fname, payload, mime))
 
-        document = Document(
-            str(path),
-            "msg",
-            subject or path.stem,
-            metadata={
-                "from": sender,
-                "to": recipients,
-                "date": date_val,
-                "attachments": len(attachments),
-            },
-        )
-        _add_email_headers_and_body(
-            document,
-            headers=[("From", sender), ("To", recipients), ("Cc", cc), ("Date", date_val)],
-            plain_body=plain_body,
-            html_body=html_body,
-            attachments=attachments,
-            output_assets=output_assets,
-        )
-        return document
-    finally:
-        close_fn = getattr(msg, "close", None)
-        if callable(close_fn):
-            close_fn()
+    document = Document(
+        str(path),
+        "msg",
+        subject or path.stem,
+        metadata={
+            "from": sender,
+            "to": recipients,
+            "date": date_val,
+            "attachments": len(attachments),
+        },
+    )
+    _add_email_headers_and_body(
+        document,
+        headers=[("From", sender), ("To", recipients), ("Cc", cc), ("Date", date_val)],
+        plain_body=plain_body,
+        html_body=html_body,
+        attachments=attachments,
+        output_assets=output_assets,
+    )
+    return document
 
 
 def convert_email(path: Path, output_assets: Optional[Path] = None) -> Document:

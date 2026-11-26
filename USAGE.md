@@ -100,7 +100,7 @@ document-to-markdown digital_report.pdf --ocr off
 ```
 
 In the default `--ocr auto` mode:
-- Digital pages with native text are extracted directly via PyMuPDF and reordered across columns.
+- Digital pages with native text and tables are extracted directly via `pdfplumber` and reordered across columns.
 - Scanned pages (`< 40` native characters with images) or image-dominated pages (`< 250` native characters and images covering `>= 35%` of the page area) are automatically routed to OCR.
 - Repeated top/bottom headers and footers across multi-page PDFs are automatically detected and stripped.
 
@@ -197,7 +197,7 @@ document-to-markdown metrics.csv -o metrics.md
 Supported formats: `.xlsx`, `.xlsm` (legacy `.xls` must be converted to `.xlsx` first).
 
 ```bash
-# Standard conversion (uses cached values, LibreOffice, or formulas fallback)
+# Standard conversion (uses cached values, LibreOffice, or xlcalculator fallback)
 document-to-markdown financials.xlsx -o financials.md
 
 # Skip external LibreOffice / pure-Python formula recalculation

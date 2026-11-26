@@ -24,7 +24,7 @@ from document_converter.ocr_engine import (
     run_structure_on_image,
     structure_result_to_blocks,
 )
-from document_converter.pdf_adapter import _page_needs_ocr
+from document_converter.pdf_adapter import _page_blocks, _page_needs_ocr
 
 
 def test_language_mapping() -> None:
@@ -122,16 +122,35 @@ def test_plain_ocr_line_sorting_and_multicolumn() -> None:
 
 
 def test_page_needs_ocr_and_tesseract_lang() -> None:
-    page = MagicMock()
-    page.rect.width = 1000
-    page.rect.height = 1000
-    page.get_images.return_value = [(1,)]
-    img_rect = MagicMock()
-    img_rect.width = 800
-    img_rect.height = 600
-    page.get_image_rects.return_value = [img_rect]
+    page = types.SimpleNamespace(
+        width=1000.0,
+        height=1000.0,
+        images=[{"x0": 100, "top": 100, "x1": 900, "bottom": 700, "width": 800, "height": 600}],
+    )
     assert _page_needs_ocr(page, "Header text with 60 characters so native_text >= 40 chars here!") is True
     assert _page_needs_ocr(page, "x" * 300) is False
+
+    # Also test native pdfplumber _page_blocks extraction (heading + paragraph + ruled table)
+    fake_table = MagicMock()
+    fake_table.bbox = (50.0, 200.0, 500.0, 300.0)
+    fake_table.extract.return_value = [["Col A", "Col B"], ["1", "2"]]
+    fake_pdf_page = MagicMock()
+    fake_pdf_page.width = 600.0
+    fake_pdf_page.height = 800.0
+    fake_pdf_page.find_tables.return_value = [fake_table]
+    fake_pdf_page.extract_words.return_value = [
+        {"text": "MAIN", "x0": 50.0, "top": 20.0, "x1": 120.0, "bottom": 42.0, "size": 18.0},
+        {"text": "TITLE", "x0": 128.0, "top": 20.0, "x1": 200.0, "bottom": 42.0, "size": 18.0},
+        {"text": "Body", "x0": 50.0, "top": 80.0, "x1": 90.0, "bottom": 92.0, "size": 11.0},
+        {"text": "text", "x0": 95.0, "top": 80.0, "x1": 130.0, "bottom": 92.0, "size": 11.0},
+        # Word inside table bbox should be ignored to avoid duplication
+        {"text": "Col", "x0": 60.0, "top": 210.0, "x1": 90.0, "bottom": 225.0, "size": 11.0},
+    ]
+    pblocks = _page_blocks(fake_pdf_page, page_number=1)
+    assert [b.kind for b in pblocks] == ["heading", "paragraph", "table"]
+    assert pblocks[0].text == "MAIN TITLE"
+    assert pblocks[1].text == "Body text"
+    assert pblocks[2].rows == [["Col A", "Col B"], ["1", "2"]]
 
     fake_tess = types.SimpleNamespace(
         Output=types.SimpleNamespace(DICT="dict"),
@@ -929,33 +948,58 @@ def test_email_html_and_csv_adapters_end_to_end(tmp_path: Path) -> None:
     assert "chart.png" in emd
     assert (tmp_path / "memo_assets" / "chart.png").exists()
 
-    # 2. Outlook .msg via mocked extract_msg
+    # 2. Outlook .msg via mocked BSD olefile
     msg_file = tmp_path / "outlook.msg"
-    msg_file.write_bytes(b"FAKE_MSG")
+    msg_file.write_bytes(b"FAKE_OLE_MSG")
 
-    class FakeMsg:
-        subject = "Outlook Update"
-        sender = "cto@example.com"
-        to = "team@example.com"
-        cc = ""
-        date = "2026-11-26"
-        body = "Release is live."
-        htmlBody = b"<table><tr><th>Env</th><th>Status</th></tr><tr><td>Prod</td><td>OK</td></tr></table>"
-        attachments = []
+    class _FakeStream:
+        def __init__(self, data: bytes):
+            self._data = data
+
+        def read(self) -> bytes:
+            return self._data
+
+    class FakeOleFileIO:
+        _streams = {
+            ("__substg1.0_0037001F",): "Outlook Update".encode("utf-16-le"),
+            ("__substg1.0_0C1A001F",): "CTO".encode("utf-16-le"),
+            ("__substg1.0_0C1F001F",): "cto@example.com".encode("utf-16-le"),
+            ("__substg1.0_0E04001F",): "team@example.com".encode("utf-16-le"),
+            ("__substg1.0_1000001F",): "Release is live.".encode("utf-16-le"),
+            ("__substg1.0_10130102",): b"<table><tr><th>Env</th><th>Status</th></tr><tr><td>Prod</td><td>OK</td></tr></table>",
+            ("__attach_version1.0_#00000000", "__substg1.0_3707001F"): "spec.pdf".encode("utf-16-le"),
+            ("__attach_version1.0_#00000000", "__substg1.0_370E001F"): "application/pdf".encode("utf-16-le"),
+            ("__attach_version1.0_#00000000", "__substg1.0_37010102"): b"%PDF-1.4",
+        }
 
         def __init__(self, path):
             self.path = path
 
-        def close(self):
-            pass
+        def __enter__(self):
+            return self
 
-    fake_extract_msg = types.SimpleNamespace(Message=FakeMsg)
+        def __exit__(self, *args):
+            return False
+
+        def exists(self, parts):
+            return tuple(parts) in self._streams
+
+        def openstream(self, parts):
+            return _FakeStream(self._streams[tuple(parts)])
+
+        def listdir(self, streams=True, storages=False):
+            return [list(k) for k in self._streams]
+
+    fake_olefile = types.SimpleNamespace(OleFileIO=FakeOleFileIO)
     out_msg = tmp_path / "outlook.md"
-    with patch.dict(sys.modules, {"extract_msg": fake_extract_msg}):
+    with patch.dict(sys.modules, {"olefile": fake_olefile}):
         assert main([str(msg_file), "-o", str(out_msg)]) == 0
     mmd = out_msg.read_text(encoding="utf-8")
     assert "# Outlook Update" in mmd
+    assert "CTO" in mmd
+    assert "cto@example.com" in mmd
     assert "| Prod | OK |" in mmd
+    assert "spec.pdf" in mmd
 
     # 3. HTML with script stripped, code block, blockquote, colspan table
     html_file = tmp_path / "page.html"

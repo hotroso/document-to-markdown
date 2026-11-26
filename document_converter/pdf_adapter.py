@@ -1,10 +1,10 @@
-"""Layout-aware PDF adapter with native extraction, PP-Structure and PaddleOCR."""
+"""Layout-aware PDF adapter with pdfplumber/pypdfium2 (permissive), PP-Structure & PaddleOCR."""
 
 from __future__ import annotations
 
-import io
 import logging
 import re
+import tempfile
 from collections import Counter
 from pathlib import Path
 from statistics import median
@@ -86,55 +86,172 @@ def _cluster_columns(blocks_raw: List[dict], page_width: float) -> List[List[dic
     return result_cols
 
 
+def _word_inside_any(word: dict, bboxes: List[Tuple[float, float, float, float]]) -> bool:
+    if not bboxes:
+        return False
+    cx = (float(word["x0"]) + float(word["x1"])) / 2.0
+    cy = (float(word["top"]) + float(word["bottom"])) / 2.0
+    for x0, y0, x1, y1 in bboxes:
+        if x0 - 1.0 <= cx <= x1 + 1.0 and y0 - 1.0 <= cy <= y1 + 1.0:
+            return True
+    return False
+
+
+def _clean_extracted_table(raw_rows: List[List[Optional[str]]]) -> List[List[str]]:
+    cleaned: List[List[str]] = []
+    for row in raw_rows or []:
+        cells = [re.sub(r"\s+", " ", (c or "")).strip() for c in row]
+        if any(cells):
+            cleaned.append(cells)
+    if len(cleaned) < 2 or max((len(r) for r in cleaned), default=0) < 2:
+        return []
+    return cleaned
+
+
 def _page_blocks(page, page_number: int) -> List[Block]:
-    data = page.get_text("dict", sort=True)
-    page_width = float(page.rect.width)
-    sizes = [
-        float(span.get("size", 0) or 0)
-        for raw in data.get("blocks", [])
-        for line in raw.get("lines", [])
-        for span in line.get("spans", [])
-        if span.get("text", "").strip()
-    ]
+    """Extract tables, headings, lists, and paragraphs from a pdfplumber page."""
+    page_width = float(getattr(page, "width", 0) or 0)
+
+    # 1. Detect ruled tables first so their words are not duplicated as paragraphs
+    table_entries: List[dict] = []
+    table_bboxes: List[Tuple[float, float, float, float]] = []
+    try:
+        for tbl in page.find_tables() or []:
+            rows = _clean_extracted_table(tbl.extract())
+            if rows:
+                bbox = tuple(float(v) for v in tbl.bbox)
+                table_bboxes.append(bbox)
+                table_entries.append(
+                    {
+                        "kind": "table",
+                        "rows": rows,
+                        "bbox": list(bbox),
+                    }
+                )
+    except Exception:
+        pass
+
+    # 2. Extract words with font sizes and group into lines and paragraphs
+    try:
+        words = page.extract_words(extra_attrs=["size"], keep_blank_chars=False) or []
+    except TypeError:
+        words = page.extract_words() or []
+
+    words = [w for w in words if str(w.get("text", "")).strip() and not _word_inside_any(w, table_bboxes)]
+    sizes = [float(w.get("size", 0) or 0) for w in words if float(w.get("size", 0) or 0) > 0]
     body_size = median(sizes) if sizes else 11.0
 
-    raw_blocks: List[dict] = []
-    for raw in data.get("blocks", []):
-        if "lines" not in raw:
-            continue
-        lines: List[str] = []
-        line_sizes: List[float] = []
-        for line in raw.get("lines", []):
-            text = "".join(str(span.get("text", "")) for span in line.get("spans", []))
-            if text.strip():
-                lines.append(text.strip())
-                line_sizes.extend(
-                    float(span.get("size", 0) or 0)
-                    for span in line.get("spans", [])
-                    if span.get("text", "").strip()
-                )
-        if not lines:
-            continue
-        raw_blocks.append(
-            {
-                "lines": lines,
-                "line_sizes": line_sizes,
-                "bbox": list(raw.get("bbox") or []),
-                "text": "\n".join(lines),
-            }
-        )
+    # Group words into visual lines
+    heights = [
+        max(1.0, float(w.get("bottom", 0)) - float(w.get("top", 0)))
+        for w in words
+        if float(w.get("bottom", 0)) > float(w.get("top", 0))
+    ]
+    med_h = median(heights) if heights else 11.0
+    line_tol = max(3.0, med_h * 0.5)
+    para_gap = max(8.0, med_h * 1.25)
 
-    # Multi-column aware ordering
-    ordered_groups = _cluster_columns(raw_blocks, page_width)
+    words_sorted = sorted(words, key=lambda w: ((float(w["top"]) + float(w["bottom"])) / 2.0, float(w["x0"])))
+    visual_lines: List[List[dict]] = []
+    for w in words_sorted:
+        cy = (float(w["top"]) + float(w["bottom"])) / 2.0
+        if visual_lines:
+            prev_cy = sum((float(x["top"]) + float(x["bottom"])) / 2.0 for x in visual_lines[-1]) / len(visual_lines[-1])
+            if abs(cy - prev_cy) <= line_tol:
+                visual_lines[-1].append(w)
+                continue
+        visual_lines.append([w])
+
+    # Split visual lines by wide horizontal gaps (multi-column lines) before grouping into paragraphs
+    col_gap = max(25.0, page_width * 0.08) if page_width > 0 else 40.0
+    line_segments: List[dict] = []
+    for vline in visual_lines:
+        vline.sort(key=lambda w: float(w["x0"]))
+        seg: List[dict] = []
+        for w in vline:
+            if seg and (float(w["x0"]) - float(seg[-1]["x1"])) > col_gap:
+                line_segments.append(_make_line_segment(seg, body_size))
+                seg = [w]
+            else:
+                seg.append(w)
+        if seg:
+            line_segments.append(_make_line_segment(seg, body_size))
+
+    # Cluster line segments into columns, then merge adjacent lines into paragraphs
+    ordered_cols = _cluster_columns(line_segments, page_width)
+    raw_blocks: List[dict] = []
+    for col_lines in ordered_cols:
+        col_lines.sort(key=lambda item: (item["bbox"][1], item["bbox"][0]))
+        cur_lines: List[str] = []
+        cur_sizes: List[float] = []
+        cur_bbox: Optional[List[float]] = None
+        prev_bottom: Optional[float] = None
+        prev_size: Optional[float] = None
+
+        def flush_para() -> None:
+            nonlocal cur_lines, cur_sizes, cur_bbox
+            if cur_lines and cur_bbox is not None:
+                raw_blocks.append(
+                    {
+                        "kind": "text",
+                        "lines": list(cur_lines),
+                        "line_sizes": list(cur_sizes),
+                        "bbox": list(cur_bbox),
+                        "text": "\n".join(cur_lines),
+                    }
+                )
+            cur_lines, cur_sizes, cur_bbox = [], [], None
+
+        for seg in col_lines:
+            top, bottom = seg["bbox"][1], seg["bbox"][3]
+            seg_size = median(seg["line_sizes"]) if seg["line_sizes"] else body_size
+            size_jump = prev_size is not None and abs(seg_size - prev_size) >= max(2.0, body_size * 0.2)
+            if (
+                prev_bottom is not None
+                and ((top - prev_bottom) > para_gap or size_jump)
+                and cur_lines
+            ):
+                flush_para()
+            cur_lines.append(seg["text"])
+            cur_sizes.extend(seg["line_sizes"])
+            if cur_bbox is None:
+                cur_bbox = list(seg["bbox"])
+            else:
+                cur_bbox = [
+                    min(cur_bbox[0], seg["bbox"][0]),
+                    min(cur_bbox[1], seg["bbox"][1]),
+                    max(cur_bbox[2], seg["bbox"][2]),
+                    max(cur_bbox[3], seg["bbox"][3]),
+                ]
+            prev_bottom = bottom
+            prev_size = seg_size
+        flush_para()
+
+    # Merge text blocks and ruled tables in reading order
+    all_items = raw_blocks + table_entries
+    ordered_groups = _cluster_columns(all_items, page_width)
     ordered = [b for group in ordered_groups for b in group]
 
     blocks: List[Block] = []
     for item in ordered:
+        source: Dict[str, Any] = {"page": page_number}
+        if item.get("bbox"):
+            source["bbox"] = [round(float(v), 1) for v in item["bbox"]]
+
+        if item.get("kind") == "table":
+            blocks.append(
+                Block(
+                    "table",
+                    rows=item["rows"],
+                    source=source,
+                    confidence=0.92,
+                    metadata={"detector": "pdfplumber"},
+                )
+            )
+            continue
+
         lines = item["lines"]
         text = item["text"]
-        source = {"page": page_number}
-        if item["bbox"]:
-            source["bbox"] = [round(float(v), 1) for v in item["bbox"]]
 
         table = _table_rows(lines)
         if table:
@@ -168,8 +285,36 @@ def _page_blocks(page, page_number: int) -> List[Block]:
     return blocks
 
 
+def _make_line_segment(words: List[dict], default_size: float) -> dict:
+    text = " ".join(str(w["text"]).strip() for w in words if str(w.get("text", "")).strip())
+    sizes = [float(w.get("size", 0) or default_size) for w in words]
+    bbox = [
+        min(float(w["x0"]) for w in words),
+        min(float(w["top"]) for w in words),
+        max(float(w["x1"]) for w in words),
+        max(float(w["bottom"]) for w in words),
+    ]
+    return {"text": text, "line_sizes": sizes, "bbox": bbox}
+
+
+def _render_page_pil(pdfium_doc, page_index: int, dpi: int):
+    """Render one PDF page to an RGB PIL Image using pypdfium2 (Apache-2.0 / BSD)."""
+    page = pdfium_doc[page_index]
+    try:
+        bitmap = page.render(scale=dpi / 72.0)
+        try:
+            return bitmap.to_pil().convert("RGB")
+        finally:
+            if hasattr(bitmap, "close"):
+                bitmap.close()
+    finally:
+        if hasattr(page, "close"):
+            page.close()
+
+
 def _ocr_page_with_structure(
-    page,
+    pdfium_doc,
+    page_index: int,
     page_number: int,
     lang: str,
     ocr_version: Optional[str] = None,
@@ -178,8 +323,7 @@ def _ocr_page_with_structure(
     rec_model: Optional[str] = None,
 ) -> List[Block]:
     """Render page and run PP-Structure for layout + tables + reading order."""
-    pix = page.get_pixmap(dpi=220)
-    img_bytes = pix.tobytes("png")
+    image = _render_page_pil(pdfium_doc, page_index, dpi=220)
     model_kw = {
         "ocr_version": ocr_version,
         "ocr_profile": ocr_profile,
@@ -188,26 +332,22 @@ def _ocr_page_with_structure(
     }
     try:
         import numpy as np
-        from PIL import Image
 
-        image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         img_array = np.array(image)
         return run_structure_on_image(img_array, lang=lang, page_number=page_number, **model_kw)
     except Exception:
-        # path fallback
-        import tempfile
-
         with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp.write(img_bytes)
             tmp_path = tmp.name
         try:
+            image.save(tmp_path, format="PNG")
             return run_structure_on_image(tmp_path, lang=lang, page_number=page_number, **model_kw)
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
 
 def _ocr_page_plain(
-    page,
+    pdfium_doc,
+    page_index: int,
     page_number: int,
     lang: str,
     ocr_version: Optional[str] = None,
@@ -215,73 +355,90 @@ def _ocr_page_plain(
     det_model: Optional[str] = None,
     rec_model: Optional[str] = None,
 ) -> List[Block]:
-    pix = page.get_pixmap(dpi=250)
-    img_bytes = pix.tobytes("png")
+    image = _render_page_pil(pdfium_doc, page_index, dpi=250)
     model_kw = {
         "ocr_version": ocr_version,
         "ocr_profile": ocr_profile,
         "det_model": det_model,
         "rec_model": rec_model,
     }
-    try:
-        import numpy as np
-        from PIL import Image
+    import numpy as np
 
-        image = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-        img_array = np.array(image)
-        blocks = run_plain_ocr_on_array(img_array, lang=lang, **model_kw)
-        for b in blocks:
-            b.source = {"page": page_number}
-        return blocks
-    except Exception:
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-            tmp.write(img_bytes)
-            tmp_path = tmp.name
-        try:
-            from PIL import Image
-            import numpy as np
-
-            image = Image.open(tmp_path).convert("RGB")
-            blocks = run_plain_ocr_on_array(np.array(image), lang=lang, **model_kw)
-            for b in blocks:
-                b.source = {"page": page_number}
-            return blocks
-        finally:
-            Path(tmp_path).unlink(missing_ok=True)
+    blocks = run_plain_ocr_on_array(np.array(image), lang=lang, **model_kw)
+    for b in blocks:
+        b.source = {**b.source, "page": page_number}
+    return blocks
 
 
-def _ocr_page_tesseract(page, page_number: int, lang: str) -> List[Block]:
-    try:
-        from PIL import Image
-    except ImportError as exc:
-        raise RuntimeError("Tesseract OCR requires pytesseract and Pillow") from exc
-
-    image = Image.open(io.BytesIO(page.get_pixmap(dpi=300).tobytes("png")))
+def _ocr_page_tesseract(pdfium_doc, page_index: int, page_number: int, lang: str) -> List[Block]:
+    image = _render_page_pil(pdfium_doc, page_index, dpi=300)
     return ocr_pil_image_tesseract(image, lang=lang, page_number=page_number)
 
 
 def _page_needs_ocr(page, native_text: str) -> bool:
     """Detect scanned or image-dominated PDF pages that need OCR."""
-    images = page.get_images(full=True)
+    images = getattr(page, "images", None) or []
     if not images:
         return False
     if len(native_text) < 40:
         return True
     if len(native_text) >= 250:
         return False
-    page_area = float(page.rect.width * page.rect.height)
+    page_area = float(getattr(page, "width", 0) or 0) * float(getattr(page, "height", 0) or 0)
     if page_area <= 0:
         return False
     image_area = 0.0
     for info in images:
         try:
-            for rect in page.get_image_rects(info[0]):
-                image_area += max(0.0, float(rect.width * rect.height))
+            if isinstance(info, dict):
+                w = float(info.get("width", float(info.get("x1", 0)) - float(info.get("x0", 0))))
+                h = float(info.get("height", float(info.get("bottom", 0)) - float(info.get("top", 0))))
+                image_area += max(0.0, w * h)
         except Exception:
             continue
     return (image_area / page_area) >= 0.35
+
+
+def _export_page_images(
+    page,
+    pdfium_doc,
+    page_index: int,
+    page_number: int,
+    output_assets: Path,
+    document: Document,
+) -> List[Block]:
+    images = getattr(page, "images", None) or []
+    if not images or pdfium_doc is None:
+        return []
+    dpi = 200
+    scale = dpi / 72.0
+    rendered = None
+    image_blocks: List[Block] = []
+    output_assets.mkdir(parents=True, exist_ok=True)
+    for image_index, info in enumerate(images, start=1):
+        try:
+            if rendered is None:
+                rendered = _render_page_pil(pdfium_doc, page_index, dpi=dpi)
+            rw, rh = rendered.size
+            x0 = max(0, min(rw, int(round(float(info.get("x0", 0)) * scale))))
+            y0 = max(0, min(rh, int(round(float(info.get("top", 0)) * scale))))
+            x1 = max(0, min(rw, int(round(float(info.get("x1", 0)) * scale))))
+            y1 = max(0, min(rh, int(round(float(info.get("bottom", 0)) * scale))))
+            if (x1 - x0) < 8 or (y1 - y0) < 8:
+                continue
+            filename = output_assets / f"page-{page_number:03d}-image-{image_index:02d}.png"
+            rendered.crop((x0, y0, x1, y1)).save(str(filename), format="PNG")
+            image_blocks.append(
+                Block(
+                    "image",
+                    filename.name,
+                    source={"page": page_number},
+                    metadata={"alt": f"Page {page_number} image"},
+                )
+            )
+        except Exception as exc:
+            document.warn(f"Page {page_number}: image export failed ({exc})")
+    return image_blocks
 
 
 def _remove_repeated_edges(pages: List[List[Block]], document: Document) -> None:
@@ -322,9 +479,11 @@ def convert_pdf(
     rec_model: Optional[str] = None,
 ) -> Document:
     try:
-        import fitz
+        import pdfplumber
     except ImportError as exc:
-        raise RuntimeError("PDF support requires PyMuPDF. Install it with: pip install pymupdf") from exc
+        raise RuntimeError(
+            "PDF support requires pdfplumber. Install it with: pip install pdfplumber"
+        ) from exc
 
     engine = detect_ocr_engine(ocr)
     model_kw = {
@@ -333,13 +492,34 @@ def convert_pdf(
         "det_model": det_model,
         "rec_model": rec_model,
     }
-    pdf = fitz.open(path)
+
     try:
-        if pdf.needs_pass:
-            if not password or not pdf.authenticate(password):
-                raise RuntimeError("Password required or incorrect for this PDF")
+        pdf = pdfplumber.open(str(path), password=password)
+    except Exception as exc:
+        name = type(exc).__name__.lower()
+        if "password" in name or "password" in str(exc).lower() or "encrypt" in str(exc).lower():
+            raise RuntimeError("Password required or incorrect for this PDF") from exc
+        raise
+
+    pdfium_doc = None
+
+    def get_pdfium():
+        nonlocal pdfium_doc
+        if pdfium_doc is None:
+            try:
+                import pypdfium2
+            except ImportError as exc:
+                raise RuntimeError(
+                    "PDF rendering for OCR/image export requires pypdfium2. "
+                    "Install it with: pip install pypdfium2"
+                ) from exc
+            pdfium_doc = pypdfium2.PdfDocument(str(path), password=password)
+        return pdfium_doc
+
+    try:
+        total_pages = len(pdf.pages)
         meta: Dict[str, Any] = {
-            "pages": pdf.page_count,
+            "pages": total_pages,
             "ocr_mode": ocr,
             "ocr_engine": engine,
             "use_structure": use_structure,
@@ -358,11 +538,11 @@ def convert_pdf(
             path.stem,
             metadata=meta,
         )
-        page_count = min(pdf.page_count, 3) if preview else pdf.page_count
+        page_count = min(total_pages, 3) if preview else total_pages
         page_blocks: List[List[Block]] = []
 
         for index in range(page_count):
-            page = pdf.load_page(index)
+            page = pdf.pages[index]
             native = _page_blocks(page, index + 1)
             native_text = " ".join(block.text for block in native).strip()
             use_ocr = engine != "off" and (
@@ -373,25 +553,32 @@ def convert_pdf(
 
             if use_ocr:
                 try:
+                    pdoc = get_pdfium()
                     if engine == "paddle" and use_structure:
                         try:
-                            blocks = _ocr_page_with_structure(page, index + 1, ocr_lang, **model_kw)
+                            blocks = _ocr_page_with_structure(
+                                pdoc, index, index + 1, ocr_lang, **model_kw
+                            )
                             if blocks:
                                 document.metadata["ocr_engine"] = "ppstructure"
                             else:
                                 document.warn(
                                     f"Page {index + 1}: structure returned empty; trying plain OCR."
                                 )
-                                blocks = _ocr_page_plain(page, index + 1, ocr_lang, **model_kw)
+                                blocks = _ocr_page_plain(
+                                    pdoc, index, index + 1, ocr_lang, **model_kw
+                                )
                         except Exception as se:
                             document.warn(
                                 f"Page {index + 1}: structure failed ({se}); plain OCR fallback."
                             )
-                            blocks = _ocr_page_plain(page, index + 1, ocr_lang, **model_kw)
+                            blocks = _ocr_page_plain(
+                                pdoc, index, index + 1, ocr_lang, **model_kw
+                            )
                     elif engine == "paddle":
-                        blocks = _ocr_page_plain(page, index + 1, ocr_lang, **model_kw)
+                        blocks = _ocr_page_plain(pdoc, index, index + 1, ocr_lang, **model_kw)
                     else:
-                        blocks = _ocr_page_tesseract(page, index + 1, ocr_lang)
+                        blocks = _ocr_page_tesseract(pdoc, index, index + 1, ocr_lang)
 
                     if not blocks:
                         document.warn(
@@ -405,25 +592,13 @@ def convert_pdf(
                     blocks = native
 
             image_blocks: List[Block] = []
-            if output_assets is not None:
-                output_assets.mkdir(parents=True, exist_ok=True)
-                for image_index, image_info in enumerate(page.get_images(full=True), start=1):
-                    try:
-                        pix = fitz.Pixmap(pdf, image_info[0])
-                        if pix.n > 4:
-                            pix = fitz.Pixmap(fitz.csRGB, pix)
-                        filename = output_assets / f"page-{index + 1:03d}-image-{image_index:02d}.png"
-                        pix.save(str(filename))
-                        image_blocks.append(
-                            Block(
-                                "image",
-                                filename.name,
-                                source={"page": index + 1},
-                                metadata={"alt": f"Page {index + 1} image"},
-                            )
-                        )
-                    except Exception as exc:
-                        document.warn(f"Page {index + 1}: image export failed ({exc})")
+            if output_assets is not None and (getattr(page, "images", None) or []):
+                try:
+                    image_blocks = _export_page_images(
+                        page, get_pdfium(), index, index + 1, output_assets, document
+                    )
+                except Exception as exc:
+                    document.warn(f"Page {index + 1}: image export failed ({exc})")
             page_blocks.append(blocks + image_blocks)
 
         _remove_repeated_edges(page_blocks, document)
@@ -435,3 +610,5 @@ def convert_pdf(
         return document
     finally:
         pdf.close()
+        if pdfium_doc is not None and hasattr(pdfium_doc, "close"):
+            pdfium_doc.close()

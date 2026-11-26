@@ -161,80 +161,38 @@ def _recalculate_with_libreoffice(path: Path, temp_dir: Path, document: Document
     return None
 
 
-def _evaluate_with_formulas_lib(path: Path, document: Document) -> Optional[Dict[Tuple[str, int, int], object]]:
-    """
-    Pure-Python evaluation using the `formulas` package (optional dependency).
-    Returns a map of (sheet_name, row, col) -> calculated value, or None on failure.
-    """
+def _evaluate_with_xlcalculator(path: Path, document: Document):
+    """Pure-Python evaluation using MIT-licensed `xlcalculator` (optional dependency)."""
     try:
-        import formulas
+        from xlcalculator import Evaluator, ModelCompiler
     except ImportError:
         return None
 
     try:
-        xl_model = formulas.ExcelModel().loads(str(path)).finish()
-        xl_model.calculate()
+        compiler = ModelCompiler()
+        model = compiler.read_and_parse_archive(str(path))
+        evaluator = Evaluator(model)
+        document.metadata["formula_recalculation"] = "xlcalculator"
+        logger.info("Loaded xlcalculator engine for %s", path.name)
+        return evaluator
     except Exception as exc:
-        document.warn(f"Pure-Python formula engine (formulas) failed: {exc}")
-        return None
-
-    values: Dict[Tuple[str, int, int], object] = {}
-    try:
-        # formulas stores results in xl_model.books / calculation graph
-        # Access via the compiled cells
-        for book_name, book in getattr(xl_model, "books", {}).items():
-            for sheet_name, sheet in getattr(book, "sheets", {}).items() if hasattr(book, "sheets") else []:
-                # Fallback traversal below is more reliable across versions
-                pass
-
-        # More portable way: iterate over the calculation results if available
-        results = getattr(xl_model, "calculate", lambda: {})()
-        if isinstance(results, dict):
-            for key, val in results.items():
-                # keys often look like "'Sheet1'!A1" or similar
-                pass
-    except Exception:
-        pass
-
-    # Reliable extraction: re-open with openpyxl after writing calculated values is hard.
-    # Instead, use the cell-level API that formulas exposes in recent versions.
-    try:
-        from openpyxl.utils import coordinate_from_string, column_index_from_string
-
-        # formulas ExcelModel keeps a mapping; we evaluate ranges we care about later.
-        # Store the model on document for per-cell lookup.
-        document.metadata["_formulas_model"] = xl_model
-        document.metadata["formula_recalculation"] = "formulas"
-        logger.info("Loaded formulas engine for %s", path.name)
-        return {}  # signal that model is available; values resolved on demand
-    except Exception as exc:
-        document.warn(f"Could not attach formulas model ({exc})")
+        document.warn(f"Pure-Python formula engine (xlcalculator) failed: {exc}")
         return None
 
 
-def _cell_value_from_formulas_model(model, sheet_name: str, row: int, col: int) -> Optional[object]:
-    """Try to get a calculated value from a formulas ExcelModel."""
+def _cell_value_from_evaluator(evaluator, sheet_name: str, row: int, col: int) -> Optional[object]:
+    """Evaluate a single cell using an xlcalculator Evaluator."""
     try:
         from openpyxl.utils import get_column_letter
 
-        addr = f"'{sheet_name}'!{get_column_letter(col)}{row}"
-        # Common access patterns across formulas versions
-        if hasattr(model, "compile") or True:
+        col_letter = get_column_letter(col)
+        for addr in (f"{sheet_name}!{col_letter}{row}", f"'{sheet_name}'!{col_letter}{row}"):
             try:
-                val = model[addr]
-                if callable(val):
-                    val = val()
-                return val
+                val = evaluator.evaluate(addr)
+                if val is not None:
+                    return val
             except Exception:
-                pass
-        # Alternative: range evaluation
-        try:
-            res = model.calculate(addr)
-            if isinstance(res, dict):
-                return next(iter(res.values()), None)
-            return res
-        except Exception:
-            pass
+                continue
     except Exception:
         pass
     return None
@@ -261,9 +219,9 @@ def _resolve_cell(
     if cached_value is not None and not (isinstance(cached_value, str) and cached_value.startswith("=")):
         return _display(cached_value)
 
-    # 2) Pure-Python formulas model
+    # 2) Pure-Python xlcalculator evaluator
     if formulas_model is not None:
-        py_val = _cell_value_from_formulas_model(formulas_model, ws.title, row, col)
+        py_val = _cell_value_from_evaluator(formulas_model, ws.title, row, col)
         if py_val is not None and not (isinstance(py_val, str) and str(py_val).startswith("=")):
             return _display(py_val)
 
@@ -351,14 +309,12 @@ def convert_excel(path: Path, recalculate: bool = True) -> Document:
             if lo_result is not None:
                 calculation_source = lo_result
             else:
-                # Tier 2: pure-Python formulas library
-                py_map = _evaluate_with_formulas_lib(path, document)
-                if py_map is not None:
-                    formulas_model = document.metadata.pop("_formulas_model", None)
+                # Tier 2: pure-Python xlcalculator library (MIT)
+                formulas_model = _evaluate_with_xlcalculator(path, document)
                 if document.metadata.get("formula_recalculation") == "not_needed":
                     document.metadata["formula_recalculation"] = "cached_only"
                     document.warn(
-                        "No external calculator available (LibreOffice / formulas). "
+                        "No external calculator available (LibreOffice / xlcalculator). "
                         "Using cached Excel values only; cells without cache keep formula text."
                     )
 
