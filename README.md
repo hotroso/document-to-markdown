@@ -95,6 +95,9 @@ document-to-markdown report.xlsx -o report.md
 
 # Disable PP-Structure layout analysis (faster plain OCR only)
 document-to-markdown complex.pdf --no-structure
+
+# Use lightweight mobile PaddleOCR models (much faster on CPU)
+document-to-markdown scan.pdf --ocr-profile mobile --ocr-version PP-OCRv5
 ```
 
 ### CLI Options
@@ -106,6 +109,10 @@ document-to-markdown complex.pdf --no-structure
 | `--mode` | `balanced` (default), `fidelity`, `ai` | Markdown style (`fidelity`/`ai` include source location comments; `ai` suppresses inline warning blockquotes) |
 | `--ocr` | `auto` (default), `paddle`, `tesseract`, `off` | OCR backend (`auto` prefers PaddleOCR / PP-Structure and falls back to Tesseract) |
 | `--lang` | `vie` (default), `eng`, `eng+vie`, … | OCR language (`vie` covers Vietnamese + English/Latin in PaddleOCR) |
+| `--ocr-profile` | `auto` (default), `mobile`, `server` | PaddleOCR model profile (`mobile` uses lightweight detection for much faster CPU inference) |
+| `--ocr-version` | unset (Paddle default) | PaddleOCR model version (e.g. `PP-OCRv5`, `PP-OCRv4`, `PP-OCRv3`) |
+| `--det-model` | unset | Explicit PaddleOCR text detection model name (e.g. `PP-OCRv5_mobile_det`) |
+| `--rec-model` | unset | Explicit PaddleOCR text recognition model name (e.g. `latin_PP-OCRv5_mobile_rec`) |
 | `--no-structure` | flag | Disable PP-Structure layout/table analysis and use plain OCR only |
 | `--assets`, `--images` | flag | Export images extracted from PDF into `<stem>_assets/` |
 | `--meta` | flag | Export machine-readable `<stem>.meta.json` metadata sidecar |
@@ -123,11 +130,15 @@ from document_converter import convert_file
 output_md = convert_file(
     "report.pdf",
     "output/report.md",
-    mode="balanced",      # "balanced" | "fidelity" | "ai"
-    ocr="auto",           # "auto" | "paddle" | "tesseract" | "off"
-    ocr_lang="vie",       # "vie", "eng", "eng+vie", ...
-    export_images=False,  # True to create output/report_assets/
-    export_meta=False,    # True to create output/report.meta.json
+    mode="balanced",       # "balanced" | "fidelity" | "ai"
+    ocr="auto",            # "auto" | "paddle" | "tesseract" | "off"
+    ocr_lang="vie",        # "vie", "eng", "eng+vie", ...
+    ocr_profile="auto",    # "auto" | "mobile" | "server"
+    ocr_version=None,      # e.g. "PP-OCRv5", "PP-OCRv4"
+    det_model=None,        # e.g. "PP-OCRv5_mobile_det"
+    rec_model=None,        # e.g. "latin_PP-OCRv5_mobile_rec"
+    export_images=False,   # True to create output/report_assets/
+    export_meta=False,     # True to create output/report.meta.json
 )
 ```
 
@@ -154,6 +165,10 @@ When a workbook contains formulas, the converter resolves cell values in order:
 - Mixing two completely different writing systems in a single PaddleOCR pass (e.g., Vietnamese + Japanese on the same page) is limited by single-model recognition dictionaries; use `--ocr tesseract` with system language packs when needed.
 
 ## Changelog
+
+### 0.4.0
+- Add optional PaddleOCR model selection across CLI and Python API while preserving defaults: `--ocr-profile` (`auto` | `mobile` | `server`), `--ocr-version` (e.g. `PP-OCRv5`, `PP-OCRv4`, `PP-OCRv3`), `--det-model`, and `--rec-model`
+- Key cached OCR / PP-Structure engines by full model configuration and keep graceful fallbacks for `PPStructureV3` and PaddleOCR 2.x
 
 ### 0.3.3
 - Fix `ValueError: The truth value of an array with more than one element is ambiguous` when reading NumPy array outputs (`rec_texts`, `rec_scores`, `rec_boxes`, `dt_polys`, `bbox`) from PaddleOCR 3.x / PP-Structure and normalize NumPy bounding boxes in `_bbox_rect`

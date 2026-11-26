@@ -1,6 +1,6 @@
 """Free-form PDF, image and Excel to Markdown converter with PP-Structure / PaddleOCR."""
 
-__version__ = "0.3.3"
+__version__ = "0.4.0"
 
 from .pipeline import convert_file
 
