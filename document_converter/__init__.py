@@ -1,6 +1,6 @@
-"""Free-form PDF, image and Excel to Markdown converter with PP-Structure / PaddleOCR."""
+"""Local PDF, Office (DOCX, PPTX, Excel), Email, HTML, CSV, and image to Markdown converter."""
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from .pipeline import convert_file
 

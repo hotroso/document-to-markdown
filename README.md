@@ -9,13 +9,14 @@
 
 ![document-to-markdown banner](docs/social-preview.png)
 
-Local, zero-config converter for **PDF**, **images**, and **Excel** files into clean, AI/RAG-ready **Markdown**.
+Local, zero-config converter for **PDF**, **Office (DOCX, PPTX, Excel)**, **Email (EML/Outlook MSG)**, **HTML**, **CSV/TSV**, and **images** into clean, AI/RAG-ready **Markdown**.
 
-Designed for personal AI, LLM, and RAG workflows where document layouts vary wildly and you want clean `.md` files out of the box without complex setup.
+Designed for personal and enterprise AI, LLM, and RAG workflows where document layouts vary wildly and you want clean `.md` files out of the box without complex setup or cloud APIs.
 
 ## Highlights
 
-- **Clean Markdown by default**: Outputs only the `.md` file by default. Extracted PDF image folders (`_assets`) and JSON metadata sidecars (`.meta.json`) are opt-in via `--assets` and `--meta`.
+- **Clean Markdown by default**: Outputs only the `.md` file by default. Extracted image/attachment folders (`_assets`) and JSON metadata sidecars (`.meta.json`) are opt-in via `--assets` and `--meta`.
+- **Broad local document support out of the box**: Zero extra dependencies for **Word (`.docx`)**, **PowerPoint (`.pptx` with speaker notes)**, **Email (`.eml`)**, **HTML**, and **CSV/TSV**, plus **PDF**, **Excel (`.xlsx`/`.xlsm`)**, **images**, and optional **Outlook (`.msg`)**.
 - **Layout-aware PDF & Image conversion**: Combines native PDF text extraction (PyMuPDF) with automatic OCR on scanned or image-heavy pages, powered by **PP-Structure / PP-StructureV3** and **PaddleOCR** (with **Tesseract** fallback).
 - **Simple multilingual OCR**: Defaults to `--lang vie`, which handles **Vietnamese, English, and Latin-script text** out of the box in PaddleOCR. Combined specifications such as `eng+vie` or `eng+jpn` automatically select the broader recognition model instead of dropping secondary languages.
 - **Phone photo & scan friendly**: Automatically applies EXIF orientation correction, handles multi-page TIFFs, detects multi-column reading order, and removes repeated page headers/footers.
@@ -28,19 +29,23 @@ Designed for personal AI, LLM, and RAG workflows where document layouts vary wil
 |-------|------------|--------------|
 | **PDF** | `.pdf` | Native text extraction + automatic OCR on scanned/image-dominated pages, multi-column ordering, repeated header/footer removal, password prompt (`--password`), optional image export (`--assets`). |
 | **Images** | `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`, `.tif`, `.tiff` | EXIF auto-rotation, multi-frame TIFF support, layout/table analysis (PP-Structure) or line-grouped plain OCR, automatic Tesseract fallback. |
+| **Word** | `.docx` | Pure-Python OOXML parsing (zero extra dependencies): headings, paragraphs, hyperlinks, nested ordered/unordered lists, tables with merged cells, tracked-deletion filtering, footnotes, optional `--assets` image export. |
+| **PowerPoint** | `.pptx` | True presentation slide ordering, slide titles, visual reading order, nested bullets, tables, **speaker notes**, slide dividers (`---`), optional `--assets` image export. |
 | **Excel** | `.xlsx`, `.xlsm` | Multi-region sheet splitting, merged cell handling, 3-tier formula evaluation (cached → LibreOffice → `formulas`), numeric column alignment. |
+| **Email** | `.eml`, `.msg` | Headers table (`From`, `To`, `Cc`, `Date`), plain text / HTML body conversion, quoted replies, attachment listing & optional `--assets` export (`.msg` via `[outlook]` extra). |
+| **Web & Tabular** | `.html`, `.htm`, `.csv`, `.tsv` | Clean semantic HTML extraction (headings, lists, code fences, blockquotes, colspan/rowspan tables; strips scripts/styles) and auto-delimiter CSV/TSV tables. |
 
 ## Why `document-to-markdown`?
 
 | Capability | `document-to-markdown` | `markitdown` | `pymupdf4llm` | `docling` |
 |------------|:----------------------:|:------------:|:-------------:|:---------:|
-| 100% local & offline | Yes | Yes | Yes | Yes |
-| Hybrid native PDF + automatic scan OCR | Yes (PyMuPDF + PaddleOCR) | Basic / optional | Native PDF focus | Yes |
-| PP-StructureV3 layout & table OCR | Yes (with Tesseract fallback) | No | No | Yes (DocLayNet) |
-| Vietnamese + English multilingual OCR out of the box | Yes (`--lang vie`) | Limited | Native only | Depends on OCR engine |
+| Supported formats | PDF, DOCX, PPTX, XLSX, EML/MSG, HTML, CSV/TSV, Images | Broadest (PDF, Office, MSG, HTML, EPUB, audio, ZIP…) | PDF, XPS, EPUB, Office (via PyMuPDF) | PDF, DOCX, PPTX, XLSX, HTML, Images |
+| 100% local & offline | Yes | Yes (LLM needed for image captions) | Yes | Yes |
+| Hybrid native PDF + automatic scan OCR | Yes (PyMuPDF + PaddleOCR) | Text-only PDF (`pdfminer`) | Native PDF focus | Yes |
+| Layout & table OCR | PP-StructureV3 + Tesseract fallback | No built-in OCR | No | DocLayNet + OCR |
+| Vietnamese + English OCR out of the box | Yes (`--lang vie`) | External LLM required | Native text only | Depends on OCR backend |
 | Configurable CPU/GPU OCR speed (`mobile` / `server`) | Yes (`--ocr-profile`) | No | N/A | Configurable |
 | Multi-table Excel splitting + 3-tier formula evaluation | Yes | Basic sheet dump | No | Basic |
-| Clean single `.md` output by default (opt-in assets/meta) | Yes | Yes | Yes | Configurable |
 | Prebuilt standalone executables (Win / Linux / macOS) | Yes | No | No | No |
 
 ## Installation
@@ -52,13 +57,14 @@ Requires **Python >= 3.10**.
 Install directly from GitHub in one command without cloning:
 
 ```bash
-# Base install (native PDF + Excel)
+# Base install (PDF, DOCX, PPTX, Excel, EML, HTML, CSV/TSV)
 pip install git+https://github.com/hotroso/document-to-markdown.git
 
 # Recommended: add PaddleOCR + PP-Structure layout/table analysis
 pip install "document-to-markdown[ocr] @ git+https://github.com/hotroso/document-to-markdown.git"
 
-# Optional: Tesseract OCR fallback or Excel formula engine
+# Optional extras: Outlook .msg, Tesseract OCR fallback, or Excel formula engine
+pip install "document-to-markdown[outlook] @ git+https://github.com/hotroso/document-to-markdown.git"
 pip install "document-to-markdown[tesseract] @ git+https://github.com/hotroso/document-to-markdown.git"
 pip install "document-to-markdown[excel-calc] @ git+https://github.com/hotroso/document-to-markdown.git"
 
@@ -180,6 +186,11 @@ When a workbook contains formulas, the converter resolves cell values in order:
 - Mixing two completely different writing systems in a single PaddleOCR pass (e.g., Vietnamese + Japanese on the same page) is limited by single-model recognition dictionaries; use `--ocr tesseract` with system language packs when needed.
 
 ## Changelog
+
+### 0.5.0
+- Add zero-dependency native adapters for Word (`.docx` with headings, nested lists, merged-cell tables, hyperlinks, tracked-deletion filtering, footnotes, `--assets`), PowerPoint (`.pptx` with true slide order, bullets, tables, speaker notes, `--assets`), Email (`.eml`), HTML (`.html`/`.htm` with code blocks, blockquotes, colspan/rowspan tables), and CSV/TSV (`.csv`/`.tsv`)
+- Add Outlook `.msg` email support via optional `[outlook]` extra (`extract-msg`, bundled in standalone release binaries)
+- Enhance Markdown renderer with nested list indentation, fenced code blocks, and blockquotes
 
 ### 0.4.0
 - Add optional PaddleOCR model selection across CLI and Python API while preserving defaults: `--ocr-profile` (`auto` | `mobile` | `server`), `--ocr-version` (e.g. `PP-OCRv5`, `PP-OCRv4`, `PP-OCRv3`), `--det-model`, and `--rec-model`
