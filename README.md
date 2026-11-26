@@ -1,6 +1,7 @@
 # Document to Markdown
 
 [![CI](https://github.com/hotroso/document-to-markdown/actions/workflows/ci.yml/badge.svg)](https://github.com/hotroso/document-to-markdown/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/document-to-markdown)](https://pypi.org/project/document-to-markdown/)
 [![Release](https://img.shields.io/github/v/release/hotroso/document-to-markdown?include_prereleases&sort=semver)](https://github.com/hotroso/document-to-markdown/releases)
 [![Downloads](https://img.shields.io/github/downloads/hotroso/document-to-markdown/total)](https://github.com/hotroso/document-to-markdown/releases)
 [![Python](https://img.shields.io/badge/python-%3E%3D3.10-blue)](pyproject.toml)
@@ -39,24 +40,28 @@ Designed for personal and enterprise AI, LLM, and RAG workflows where document l
 
 Requires **Python >= 3.10**.
 
-### Direct Install via `pip` (Recommended)
-
-Install directly from GitHub in one command without cloning:
+### Install from PyPI (Recommended)
 
 ```bash
 # Base install (PDF, DOCX, PPTX, Excel, EML, HTML, CSV/TSV)
-pip install git+https://github.com/hotroso/document-to-markdown.git
+pip install document-to-markdown
 
 # Recommended: add PaddleOCR + PP-Structure layout/table analysis
-pip install "document-to-markdown[ocr] @ git+https://github.com/hotroso/document-to-markdown.git"
+pip install "document-to-markdown[ocr]"
 
 # Optional extras: Outlook .msg, Tesseract OCR fallback, or Excel formula engine
-pip install "document-to-markdown[outlook] @ git+https://github.com/hotroso/document-to-markdown.git"
-pip install "document-to-markdown[tesseract] @ git+https://github.com/hotroso/document-to-markdown.git"
-pip install "document-to-markdown[excel-calc] @ git+https://github.com/hotroso/document-to-markdown.git"
+pip install "document-to-markdown[outlook]"
+pip install "document-to-markdown[tesseract]"
+pip install "document-to-markdown[excel-calc]"
 
 # Install everything
-pip install "document-to-markdown[all] @ git+https://github.com/hotroso/document-to-markdown.git"
+pip install "document-to-markdown[all]"
+```
+
+### Install Latest from GitHub
+
+```bash
+pip install "document-to-markdown[ocr] @ git+https://github.com/hotroso/document-to-markdown.git"
 ```
 
 ### From Local Source (Development)
