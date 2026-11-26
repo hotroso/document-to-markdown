@@ -1,6 +1,6 @@
 """Local PDF, Office (DOCX, PPTX, Excel), Email, HTML, CSV, and image to Markdown converter."""
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 from .pipeline import convert_file
 

@@ -174,6 +174,9 @@ When a workbook contains formulas, the converter resolves cell values in order:
 
 ## Changelog
 
+### 0.6.1
+- Make OCR engine detection truly lazy using `importlib.util.find_spec` and deferring detection in `convert_pdf` until a page actually needs OCR, avoiding heavy PaddleOCR / PaddleX startup imports on digital-only PDFs
+
 ### 0.6.0
 - Switch project license to **MIT License with Commons Clause v1.0** (source-available) backed by a 100% permissive dependency stack (no AGPL, GPL, or EUPL dependencies)
 - Replace `PyMuPDF` (AGPL-3.0) with `pdfplumber` (MIT) + `pypdfium2` (Apache-2.0 / BSD-3-Clause), adding native ruled-table detection for digital PDFs
